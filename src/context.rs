@@ -152,6 +152,18 @@ impl Context {
         Ok(())
     }
 
+    pub fn set_units<I, K, V>(&mut self, units: I) -> Result<(), String>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        for (unit_type, uid) in units {
+            self.set_unit(&unit_type.into(), &uid.into())?;
+        }
+        Ok(())
+    }
+
     pub fn get_unit(&self, unit_type: &str) -> Option<&String> {
         self.units.get(unit_type)
     }
@@ -177,6 +189,31 @@ impl Context {
         Ok(())
     }
 
+    pub fn set_attributes<I, K, V>(&mut self, attrs: I) -> Result<(), String>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<Value>,
+    {
+        if self.is_finalized() {
+            return Err("ABSmartly Context is finalized.".to_string());
+        }
+        if self.is_finalizing() {
+            return Err("ABSmartly Context is finalizing.".to_string());
+        }
+
+        let set_at = now_millis();
+        for (name, value) in attrs {
+            self.attrs.push(Attribute {
+                name: name.into(),
+                value: value.into(),
+                set_at,
+            });
+            self.attrs_seq += 1;
+        }
+        Ok(())
+    }
+
     pub fn get_attribute(&self, name: &str) -> Option<&Value> {
         self.attrs
             .iter()
@@ -197,6 +234,16 @@ impl Context {
         self.overrides.insert(experiment_name.to_string(), variant);
     }
 
+    pub fn set_overrides<I, K>(&mut self, overrides: I)
+    where
+        I: IntoIterator<Item = (K, i32)>,
+        K: Into<String>,
+    {
+        for (experiment_name, variant) in overrides {
+            self.overrides.insert(experiment_name.into(), variant);
+        }
+    }
+
     pub fn set_custom_assignment(&mut self, experiment_name: &str, variant: i32) -> Result<(), String> {
         if self.is_finalized() {
             return Err("ABSmartly Context is finalized.".to_string());
@@ -206,6 +253,17 @@ impl Context {
         }
         self.cassignments
             .insert(experiment_name.to_string(), variant);
+        Ok(())
+    }
+
+    pub fn set_custom_assignments<I, K>(&mut self, assignments: I) -> Result<(), String>
+    where
+        I: IntoIterator<Item = (K, i32)>,
+        K: Into<String>,
+    {
+        for (experiment_name, variant) in assignments {
+            self.set_custom_assignment(&experiment_name.into(), variant)?;
+        }
         Ok(())
     }
 
@@ -964,6 +1022,37 @@ mod tests {
 
         assert!(context.set_attribute("premium", true).is_ok());
         assert_eq!(context.get_attribute("premium"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn test_set_attributes_with_array() {
+        let data = make_context_data(vec![]);
+        let mut context = Context::new(data);
+
+        assert!(context
+            .set_attributes([
+                ("country", json!("US")),
+                ("age", json!(25)),
+                ("premium", json!(true)),
+            ])
+            .is_ok());
+        assert_eq!(context.get_attribute("country"), Some(&json!("US")));
+        assert_eq!(context.get_attribute("age"), Some(&json!(25)));
+        assert_eq!(context.get_attribute("premium"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn test_set_attributes_with_hashmap() {
+        let data = make_context_data(vec![]);
+        let mut context = Context::new(data);
+
+        let attrs = std::collections::HashMap::from([
+            ("country".to_string(), json!("UK")),
+            ("tier".to_string(), json!("gold")),
+        ]);
+        assert!(context.set_attributes(attrs).is_ok());
+        assert_eq!(context.get_attribute("country"), Some(&json!("UK")));
+        assert_eq!(context.get_attribute("tier"), Some(&json!("gold")));
     }
 
     #[test]

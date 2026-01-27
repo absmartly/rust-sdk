@@ -20,6 +20,8 @@ regex = "1.10"
 thiserror = "1.0"
 md-5 = "0.10"
 base64 = "0.22"
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1.0", features = ["rt-multi-thread"] }
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full", "test-util"] }
