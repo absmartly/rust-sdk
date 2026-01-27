@@ -3,9 +3,15 @@ name = "absmartly-sdk"
 version = "0.1.0"
 edition = "2021"
 authors = ["ABsmartly"]
-description = "ABsmartly SDK for Rust"
+description = "ABsmartly SDK for Rust - A/B testing and feature flagging"
 license = "MIT"
 repository = "https://github.com/absmartly/rust-sdk"
+homepage = "https://www.absmartly.com"
+documentation = "https://docs.rs/absmartly-sdk"
+readme = "README.md"
+keywords = ["absmartly", "ab-testing", "feature-flags", "experimentation", "sdk"]
+categories = ["development-tools", "web-programming"]
+exclude = [".github/", "target/", ".claude/"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

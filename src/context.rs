@@ -160,7 +160,7 @@ impl Context {
         &self.units
     }
 
-    pub fn set_attribute(&mut self, name: &str, value: Value) -> Result<(), String> {
+    pub fn set_attribute(&mut self, name: &str, value: impl Into<Value>) -> Result<(), String> {
         if self.is_finalized() {
             return Err("ABSmartly Context is finalized.".to_string());
         }
@@ -170,7 +170,7 @@ impl Context {
 
         self.attrs.push(Attribute {
             name: name.to_string(),
-            value,
+            value: value.into(),
             set_at: now_millis(),
         });
         self.attrs_seq += 1;
@@ -227,7 +227,7 @@ impl Context {
         variant
     }
 
-    pub fn track(&mut self, goal_name: &str, properties: Option<HashMap<String, Value>>) -> Result<(), String> {
+    pub fn track(&mut self, goal_name: &str, properties: impl Into<Value>) -> Result<(), String> {
         if self.is_finalized() {
             return Err("ABSmartly Context is finalized.".to_string());
         }
@@ -235,9 +235,15 @@ impl Context {
             return Err("ABSmartly Context is finalizing.".to_string());
         }
 
+        let properties_map: Option<HashMap<String, Value>> = match properties.into() {
+            Value::Object(map) => Some(map.into_iter().collect()),
+            Value::Null => None,
+            _ => None,
+        };
+
         let goal = Goal {
             name: goal_name.to_string(),
-            properties,
+            properties: properties_map,
             achieved_at: now_millis(),
         };
 
@@ -248,7 +254,7 @@ impl Context {
         Ok(())
     }
 
-    pub fn variable_value(&mut self, key: &str, default_value: Value) -> Value {
+    pub fn variable_value(&mut self, key: &str, default_value: impl Into<Value>) -> Value {
         if let Some(experiment_names) = self.index_variables.get(key).cloned() {
             for exp_name in experiment_names {
                 let assignment = self.assign(&exp_name);
@@ -268,10 +274,10 @@ impl Context {
                 }
             }
         }
-        default_value
+        default_value.into()
     }
 
-    pub fn peek_variable_value(&mut self, key: &str, default_value: Value) -> Value {
+    pub fn peek_variable_value(&mut self, key: &str, default_value: impl Into<Value>) -> Value {
         if let Some(experiment_names) = self.index_variables.get(key).cloned() {
             for exp_name in experiment_names {
                 let assignment = self.assign(&exp_name);
@@ -284,7 +290,7 @@ impl Context {
                 }
             }
         }
-        default_value
+        default_value.into()
     }
 
     pub fn variable_keys(&self) -> HashMap<String, Vec<String>> {
@@ -784,9 +790,7 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut context = Context::new(data);
 
-        assert!(context.track("purchase", Some(HashMap::from([
-            ("amount".to_string(), json!(99.99))
-        ]))).is_ok());
+        assert!(context.track("purchase", json!({"amount": 99.99})).is_ok());
 
         assert_eq!(context.pending(), 1);
     }
@@ -796,7 +800,7 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut context = Context::new(data);
 
-        assert!(context.track("click", None).is_ok());
+        assert!(context.track("click", ()).is_ok());
         assert_eq!(context.pending(), 1);
     }
 
@@ -808,7 +812,7 @@ mod tests {
 
         context.set_unit("session_id", "test_user").unwrap();
         context.treatment("test_exp");
-        context.track("click", None).unwrap();
+        context.track("click", ()).unwrap();
 
         assert_eq!(context.pending(), 2);
         context.publish();
@@ -830,7 +834,7 @@ mod tests {
         let mut context = Context::new(data);
 
         context.finalize();
-        assert!(context.track("click", None).is_err());
+        assert!(context.track("click", ()).is_err());
     }
 
     #[test]
@@ -933,5 +937,80 @@ mod tests {
         let experiments = context.experiments();
         assert!(experiments.contains(&"exp2".to_string()));
         assert!(!experiments.contains(&"exp1".to_string()));
+    }
+
+    #[test]
+    fn test_ergonomic_set_attribute_with_string() {
+        let data = make_context_data(vec![]);
+        let mut context = Context::new(data);
+
+        assert!(context.set_attribute("country", "US").is_ok());
+        assert_eq!(context.get_attribute("country"), Some(&json!("US")));
+    }
+
+    #[test]
+    fn test_ergonomic_set_attribute_with_number() {
+        let data = make_context_data(vec![]);
+        let mut context = Context::new(data);
+
+        assert!(context.set_attribute("age", 25).is_ok());
+        assert_eq!(context.get_attribute("age"), Some(&json!(25)));
+    }
+
+    #[test]
+    fn test_ergonomic_set_attribute_with_bool() {
+        let data = make_context_data(vec![]);
+        let mut context = Context::new(data);
+
+        assert!(context.set_attribute("premium", true).is_ok());
+        assert_eq!(context.get_attribute("premium"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn test_ergonomic_variable_value_with_string_default() {
+        let data = make_context_data(vec![]);
+        let mut context = Context::new(data);
+
+        let value = context.variable_value("nonexistent", "default_value");
+        assert_eq!(value, json!("default_value"));
+    }
+
+    #[test]
+    fn test_ergonomic_variable_value_with_number_default() {
+        let data = make_context_data(vec![]);
+        let mut context = Context::new(data);
+
+        let value = context.variable_value("nonexistent", 42);
+        assert_eq!(value, json!(42));
+    }
+
+    #[test]
+    fn test_ergonomic_peek_variable_value_with_bool_default() {
+        let data = make_context_data(vec![]);
+        let mut context = Context::new(data);
+
+        let value = context.peek_variable_value("nonexistent", false);
+        assert_eq!(value, json!(false));
+    }
+
+    #[test]
+    fn test_ergonomic_track_with_json_properties() {
+        let data = make_context_data(vec![]);
+        let mut context = Context::new(data);
+
+        assert!(context.track("purchase", json!({
+            "item_count": 1,
+            "total_amount": 99.99
+        })).is_ok());
+        assert_eq!(context.pending(), 1);
+    }
+
+    #[test]
+    fn test_ergonomic_track_with_unit_no_properties() {
+        let data = make_context_data(vec![]);
+        let mut context = Context::new(data);
+
+        assert!(context.track("click", ()).is_ok());
+        assert_eq!(context.pending(), 1);
     }
 }
