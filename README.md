@@ -96,11 +96,8 @@ let sdk = ABsmartly::new(
 // Define units for the context - accepts arrays of tuples (no .to_string() needed!)
 let units = [("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")];
 
-// Create context
+// Create context (it will be ready immediately after creation)
 let mut context = sdk.create_context(units, None).await?;
-
-// Wait for context to be ready
-context.wait_until_ready()?;
 ```
 
 ### Creating a New Context with Pre-fetched Data
@@ -130,11 +127,14 @@ assert!(context.is_ready()); // Context is immediately ready
 
 ### Refreshing the Context with Fresh Experiment Data
 
-For long-running contexts, the context can be refreshed manually to pull updated experiment data:
+For long-running contexts, the context can be refreshed manually with updated experiment data:
 
 ```rust
-// Refresh the context
-context.refresh()?;
+// Fetch fresh context data from your backend
+let fresh_data: ContextData = serde_json::from_str(&api_response)?;
+
+// Refresh the context with new data
+context.refresh(fresh_data);
 ```
 
 ### Setting Extra Units for a Context
@@ -207,7 +207,7 @@ context.track("purchase", json!({
 Sometimes it is necessary to ensure all events have been published to the ABsmartly collector before proceeding. You can explicitly call the `publish()` method.
 
 ```rust
-context.publish()?;
+context.publish();
 ```
 
 ### Finalizing
@@ -215,7 +215,7 @@ context.publish()?;
 The `finalize()` method will ensure all events have been published to the ABsmartly collector, like `publish()`, and will also "seal" the context, preventing any further events from being tracked.
 
 ```rust
-context.finalize()?;
+context.finalize();
 // Context is now sealed - no more treatments or goals can be tracked
 ```
 
@@ -421,11 +421,9 @@ async fn handler(State(state): State<AppState>) -> Html<String> {
         .await
         .expect("Failed to create context");
 
-    context.wait_until_ready().expect("Context failed to become ready");
-
     let treatment = context.treatment("exp_test_experiment");
 
-    context.finalize().expect("Failed to finalize context");
+    context.finalize();
 
     if treatment == 0 {
         Html("<h1>Control Group</h1>".to_string())
@@ -455,11 +453,9 @@ async fn index(data: web::Data<AppState>) -> HttpResponse {
         .await
         .expect("Failed to create context");
 
-    context.wait_until_ready().expect("Context failed to become ready");
-
     let treatment = context.treatment("exp_test_experiment");
 
-    context.finalize().expect("Failed to finalize context");
+    context.finalize();
 
     if treatment == 0 {
         HttpResponse::Ok().body("<h1>Control Group</h1>")
@@ -507,11 +503,9 @@ async fn index(sdk: &State<Arc<ABsmartly>>) -> String {
         .await
         .expect("Failed to create context");
 
-    context.wait_until_ready().expect("Context failed to become ready");
-
     let treatment = context.treatment("exp_test_experiment");
 
-    context.finalize().expect("Failed to finalize context");
+    context.finalize();
 
     if treatment == 0 {
         String::from("<h1>Control Group</h1>")
@@ -543,19 +537,20 @@ async fn main() {
 ### Request Timeout with Tokio
 
 ```rust
-use absmartly_sdk::ABsmartly;
+use absmartly_sdk::{ABsmartly, Context};
 use tokio::time::{timeout, Duration};
 
-async fn create_context_with_timeout() -> Result<Context, Box<dyn std::error::Error>> {
+async fn create_context_with_timeout(
+    sdk: &ABsmartly
+) -> Result<Context, Box<dyn std::error::Error>> {
     let units = [("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")];
 
-    let mut context = sdk.create_context(units, None).await?;
+    let context = timeout(
+        Duration::from_millis(1500),
+        sdk.create_context(units, None)
+    ).await??;
 
-    match timeout(Duration::from_millis(1500), context.wait_until_ready_async()).await {
-        Ok(Ok(_)) => Ok(context),
-        Ok(Err(e)) => Err(Box::new(e)),
-        Err(_) => Err("Context creation timed out".into()),
-    }
+    Ok(context)
 }
 ```
 
@@ -566,18 +561,16 @@ use absmartly_sdk::ABsmartly;
 use tokio::select;
 use tokio::sync::oneshot;
 
-async fn create_context_with_cancellation() {
+async fn create_context_with_cancellation(sdk: &ABsmartly) {
     let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
 
     let units = [("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")];
 
-    let mut context = sdk.create_context(units, None).await.unwrap();
-
     select! {
-        result = context.wait_until_ready_async() => {
+        result = sdk.create_context(units, None) => {
             match result {
-                Ok(_) => println!("Context ready"),
-                Err(e) => eprintln!("Context failed: {:?}", e),
+                Ok(context) => println!("Context ready"),
+                Err(e) => eprintln!("Context creation failed: {:?}", e),
             }
         }
         _ = cancel_rx => {
