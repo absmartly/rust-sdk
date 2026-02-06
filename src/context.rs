@@ -60,6 +60,41 @@ impl Context {
         ctx
     }
 
+    pub fn new_loading() -> Self {
+        Self {
+            units: HashMap::new(),
+            attrs: Vec::new(),
+            data: ContextData::default(),
+            assignments: HashMap::new(),
+            exposures: Vec::new(),
+            goals: Vec::new(),
+            overrides: HashMap::new(),
+            cassignments: HashMap::new(),
+            state: ContextState::Loading,
+            pending: 0,
+            attrs_seq: 0,
+            index: HashMap::new(),
+            index_variables: HashMap::new(),
+            assigners: HashMap::new(),
+            hashes: HashMap::new(),
+            audience_matcher: AudienceMatcher::new(),
+            event_logger: None,
+        }
+    }
+
+    pub fn become_ready(&mut self, data: ContextData) {
+        if self.state == ContextState::Loading {
+            self.init(data);
+            self.state = ContextState::Ready;
+        }
+    }
+
+    pub fn become_failed(&mut self) {
+        if self.state == ContextState::Loading {
+            self.state = ContextState::Failed;
+        }
+    }
+
     pub fn set_event_logger(&mut self, logger: EventLogger) {
         self.event_logger = Some(logger);
     }
@@ -131,10 +166,10 @@ impl Context {
 
     pub fn set_unit(&mut self, unit_type: &str, uid: &str) -> Result<(), String> {
         if self.is_finalized() {
-            return Err("ABSmartly Context is finalized.".to_string());
+            return Err("ABsmartly Context is finalized.".to_string());
         }
         if self.is_finalizing() {
-            return Err("ABSmartly Context is finalizing.".to_string());
+            return Err("ABsmartly Context is finalizing.".to_string());
         }
 
         let uid = uid.trim();
@@ -174,10 +209,10 @@ impl Context {
 
     pub fn set_attribute(&mut self, name: &str, value: impl Into<Value>) -> Result<(), String> {
         if self.is_finalized() {
-            return Err("ABSmartly Context is finalized.".to_string());
+            return Err("ABsmartly Context is finalized.".to_string());
         }
         if self.is_finalizing() {
-            return Err("ABSmartly Context is finalizing.".to_string());
+            return Err("ABsmartly Context is finalizing.".to_string());
         }
 
         self.attrs.push(Attribute {
@@ -196,10 +231,10 @@ impl Context {
         V: Into<Value>,
     {
         if self.is_finalized() {
-            return Err("ABSmartly Context is finalized.".to_string());
+            return Err("ABsmartly Context is finalized.".to_string());
         }
         if self.is_finalizing() {
-            return Err("ABSmartly Context is finalizing.".to_string());
+            return Err("ABsmartly Context is finalizing.".to_string());
         }
 
         let set_at = now_millis();
@@ -246,10 +281,10 @@ impl Context {
 
     pub fn set_custom_assignment(&mut self, experiment_name: &str, variant: i32) -> Result<(), String> {
         if self.is_finalized() {
-            return Err("ABSmartly Context is finalized.".to_string());
+            return Err("ABsmartly Context is finalized.".to_string());
         }
         if self.is_finalizing() {
-            return Err("ABSmartly Context is finalizing.".to_string());
+            return Err("ABsmartly Context is finalizing.".to_string());
         }
         self.cassignments
             .insert(experiment_name.to_string(), variant);
@@ -287,10 +322,10 @@ impl Context {
 
     pub fn track(&mut self, goal_name: &str, properties: impl Into<Value>) -> Result<(), String> {
         if self.is_finalized() {
-            return Err("ABSmartly Context is finalized.".to_string());
+            return Err("ABsmartly Context is finalized.".to_string());
         }
         if self.is_finalizing() {
-            return Err("ABSmartly Context is finalizing.".to_string());
+            return Err("ABsmartly Context is finalizing.".to_string());
         }
 
         let properties_map: Option<HashMap<String, Value>> = match properties.into() {
@@ -1101,5 +1136,1042 @@ mod tests {
 
         assert!(context.track("click", ()).is_ok());
         assert_eq!(context.pending(), 1);
+    }
+
+    fn make_experiment_with_id(name: &str, id: i64, variants: Vec<&str>, split: Vec<f64>) -> ExperimentData {
+        ExperimentData {
+            id,
+            name: name.to_string(),
+            unit_type: Some("session_id".to_string()),
+            iteration: 1,
+            seed_hi: 0,
+            seed_lo: 0,
+            split,
+            traffic_seed_hi: 0,
+            traffic_seed_lo: 0,
+            traffic_split: vec![0.0, 1.0],
+            full_on_variant: 0,
+            audience: String::new(),
+            audience_strict: false,
+            variants: variants
+                .iter()
+                .map(|c| Variant {
+                    config: if c.is_empty() { None } else { Some(c.to_string()) },
+                })
+                .collect(),
+            variables: HashMap::new(),
+            custom_field_values: None,
+        }
+    }
+
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Debug)]
+    struct LogEntry {
+        event: String,
+        data: Option<Value>,
+    }
+
+    fn make_logging_context(data: ContextData) -> (Context, Arc<Mutex<Vec<LogEntry>>>) {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let log_clone = log.clone();
+        let mut ctx = Context::new(data);
+        ctx.set_event_logger(Box::new(move |_ctx, event, data| {
+            log_clone.lock().unwrap().push(LogEntry {
+                event: event.to_string(),
+                data,
+            });
+        }));
+        (ctx, log)
+    }
+
+    #[test]
+    fn test_event_logger_on_exposure() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        let (mut ctx, log) = make_logging_context(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.treatment("test_exp");
+
+        let entries = log.lock().unwrap();
+        assert!(entries.iter().any(|e| e.event == "exposure"));
+    }
+
+    #[test]
+    fn test_event_logger_on_goal() {
+        let data = make_context_data(vec![]);
+        let (mut ctx, log) = make_logging_context(data);
+
+        ctx.track("purchase", json!({"amount": 9.99})).unwrap();
+
+        let entries = log.lock().unwrap();
+        assert!(entries.iter().any(|e| e.event == "goal"));
+    }
+
+    #[test]
+    fn test_event_logger_on_publish() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        let (mut ctx, log) = make_logging_context(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.treatment("test_exp");
+        ctx.publish();
+
+        let entries = log.lock().unwrap();
+        assert!(entries.iter().any(|e| e.event == "publish"));
+    }
+
+    #[test]
+    fn test_event_logger_on_finalize() {
+        let data = make_context_data(vec![]);
+        let (mut ctx, log) = make_logging_context(data);
+
+        ctx.finalize();
+
+        let entries = log.lock().unwrap();
+        assert!(entries.iter().any(|e| e.event == "finalize"));
+    }
+
+    #[test]
+    fn test_event_logger_on_refresh() {
+        let exp = make_experiment("exp1", vec!["{}"], vec![1.0]);
+        let data = make_context_data(vec![exp]);
+        let (mut ctx, log) = make_logging_context(data);
+
+        let exp2 = make_experiment("exp2", vec!["{}"], vec![1.0]);
+        let data2 = make_context_data(vec![exp2]);
+        ctx.refresh(data2);
+
+        let entries = log.lock().unwrap();
+        assert!(entries.iter().any(|e| e.event == "refresh"));
+    }
+
+    #[test]
+    fn test_loading_state_become_ready() {
+        let mut ctx = Context::new_loading();
+        assert!(!ctx.is_ready());
+        assert!(!ctx.is_failed());
+
+        let data = make_context_data(vec![]);
+        ctx.become_ready(data);
+        assert!(ctx.is_ready());
+    }
+
+    #[test]
+    fn test_loading_state_become_failed() {
+        let mut ctx = Context::new_loading();
+        assert!(!ctx.is_ready());
+
+        ctx.become_failed();
+        assert!(ctx.is_failed());
+        assert!(!ctx.is_ready());
+    }
+
+    #[test]
+    fn test_become_ready_only_once() {
+        let mut ctx = Context::new_loading();
+        let data1 = make_context_data(vec![]);
+        ctx.become_ready(data1);
+        assert!(ctx.is_ready());
+
+        let exp = make_experiment("exp1", vec!["{}"], vec![1.0]);
+        let data2 = make_context_data(vec![exp]);
+        ctx.become_ready(data2);
+
+        assert!(ctx.experiments().is_empty());
+    }
+
+    #[test]
+    fn test_become_failed_only_from_loading() {
+        let mut ctx = Context::new_loading();
+        let data = make_context_data(vec![]);
+        ctx.become_ready(data);
+        assert!(ctx.is_ready());
+
+        ctx.become_failed();
+        assert!(!ctx.is_failed());
+        assert!(ctx.is_ready());
+    }
+
+    #[test]
+    fn test_set_unit_callable_before_ready() {
+        let mut ctx = Context::new_loading();
+        assert!(ctx.set_unit("session_id", "user123").is_ok());
+        assert_eq!(ctx.get_unit("session_id"), Some(&"user123".to_string()));
+    }
+
+    #[test]
+    fn test_set_attribute_callable_before_ready() {
+        let mut ctx = Context::new_loading();
+        assert!(ctx.set_attribute("country", json!("US")).is_ok());
+        assert_eq!(ctx.get_attribute("country"), Some(&json!("US")));
+    }
+
+    #[test]
+    fn test_set_override_callable_before_ready() {
+        let mut ctx = Context::new_loading();
+        ctx.set_override("exp1", 1);
+
+        let exp = make_experiment("exp1", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        ctx.become_ready(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        assert_eq!(ctx.treatment("exp1"), 1);
+    }
+
+    #[test]
+    fn test_set_custom_assignment_callable_before_ready() {
+        let mut ctx = Context::new_loading();
+        ctx.set_custom_assignment("exp1", 1).unwrap();
+
+        let exp = make_experiment("exp1", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        ctx.become_ready(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        assert_eq!(ctx.treatment("exp1"), 1);
+    }
+
+    #[test]
+    fn test_set_custom_assignment_throws_after_finalize() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+        ctx.finalize();
+
+        assert!(ctx.set_custom_assignment("exp1", 1).is_err());
+    }
+
+    #[test]
+    fn test_treatment_queues_exposure_after_peek() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.peek("test_exp");
+        assert_eq!(ctx.pending(), 0);
+
+        ctx.treatment("test_exp");
+        assert_eq!(ctx.pending(), 1);
+    }
+
+    #[test]
+    fn test_treatment_queues_exposure_with_override_variant() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        let (mut ctx, log) = make_logging_context(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.set_override("test_exp", 1);
+
+        ctx.treatment("test_exp");
+        assert_eq!(ctx.pending(), 1);
+
+        let entries = log.lock().unwrap();
+        let exposure_entry = entries.iter().find(|e| e.event == "exposure").unwrap();
+        let exposure_data = exposure_entry.data.as_ref().unwrap();
+        assert_eq!(exposure_data["overridden"], json!(true));
+        assert_eq!(exposure_data["variant"], json!(1));
+    }
+
+    #[test]
+    fn test_treatment_queues_exposure_with_custom_assignment_variant() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        let (mut ctx, log) = make_logging_context(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.set_custom_assignment("test_exp", 1).unwrap();
+
+        ctx.treatment("test_exp");
+        assert_eq!(ctx.pending(), 1);
+
+        let entries = log.lock().unwrap();
+        let exposure_entry = entries.iter().find(|e| e.event == "exposure").unwrap();
+        let exposure_data = exposure_entry.data.as_ref().unwrap();
+        assert_eq!(exposure_data["custom"], json!(true));
+        assert_eq!(exposure_data["variant"], json!(1));
+    }
+
+    #[test]
+    fn test_treatment_base_variant_on_unknown_experiment() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        assert_eq!(ctx.treatment("unknown_exp"), 0);
+        assert_eq!(ctx.pending(), 1);
+    }
+
+    #[test]
+    fn test_treatment_not_requeue_on_unknown_experiment() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.treatment("unknown_exp");
+        ctx.treatment("unknown_exp");
+        assert_eq!(ctx.pending(), 1);
+    }
+
+    #[test]
+    fn test_peek_returns_override_variant() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.set_override("test_exp", 1);
+
+        assert_eq!(ctx.peek("test_exp"), 1);
+        assert_eq!(ctx.pending(), 0);
+    }
+
+    #[test]
+    fn test_peek_audience_mismatch_non_strict() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
+        exp.audience_strict = false;
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.set_attribute("country", json!("UK")).unwrap();
+
+        let variant = ctx.peek("test_exp");
+        assert_eq!(variant, 1);
+    }
+
+    #[test]
+    fn test_peek_audience_mismatch_strict() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
+        exp.audience_strict = true;
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.set_attribute("country", json!("UK")).unwrap();
+
+        assert_eq!(ctx.peek("test_exp"), 0);
+    }
+
+    #[test]
+    fn test_treatment_audience_match_queues_with_audience_mismatch_false() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
+        exp.audience_strict = false;
+        let data = make_context_data(vec![exp]);
+        let (mut ctx, log) = make_logging_context(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.set_attribute("country", json!("US")).unwrap();
+
+        ctx.treatment("test_exp");
+
+        let entries = log.lock().unwrap();
+        let exposure_entry = entries.iter().find(|e| e.event == "exposure").unwrap();
+        let exposure_data = exposure_entry.data.as_ref().unwrap();
+        assert_eq!(exposure_data["audienceMismatch"], json!(false));
+    }
+
+    #[test]
+    fn test_treatment_audience_mismatch_queues_with_audience_mismatch_true() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
+        exp.audience_strict = false;
+        let data = make_context_data(vec![exp]);
+        let (mut ctx, log) = make_logging_context(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.set_attribute("country", json!("UK")).unwrap();
+
+        ctx.treatment("test_exp");
+
+        let entries = log.lock().unwrap();
+        let exposure_entry = entries.iter().find(|e| e.event == "exposure").unwrap();
+        let exposure_data = exposure_entry.data.as_ref().unwrap();
+        assert_eq!(exposure_data["audienceMismatch"], json!(true));
+    }
+
+    #[test]
+    fn test_treatment_audience_mismatch_strict_queues_control() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
+        exp.audience_strict = true;
+        let data = make_context_data(vec![exp]);
+        let (mut ctx, log) = make_logging_context(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.set_attribute("country", json!("UK")).unwrap();
+
+        let variant = ctx.treatment("test_exp");
+        assert_eq!(variant, 0);
+
+        let entries = log.lock().unwrap();
+        let exposure_entry = entries.iter().find(|e| e.event == "exposure").unwrap();
+        let exposure_data = exposure_entry.data.as_ref().unwrap();
+        assert_eq!(exposure_data["audienceMismatch"], json!(true));
+        assert_eq!(exposure_data["variant"], json!(0));
+    }
+
+    #[test]
+    fn test_variable_value_returns_default_when_unassigned() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![1.0, 0.0]);
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        let value = ctx.variable_value("button", json!("default"));
+        assert_eq!(value, json!("default"));
+    }
+
+    #[test]
+    fn test_variable_value_returns_override_values() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.set_override("test_exp", 1);
+
+        let value = ctx.variable_value("button", json!("default"));
+        assert_eq!(value, json!("red"));
+    }
+
+    #[test]
+    fn test_variable_value_queues_exposure() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.variable_value("button", json!("default"));
+        assert_eq!(ctx.pending(), 1);
+    }
+
+    #[test]
+    fn test_variable_value_queues_exposure_after_peek() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.peek_variable_value("button", json!("default"));
+        assert_eq!(ctx.pending(), 0);
+
+        ctx.variable_value("button", json!("default"));
+        assert_eq!(ctx.pending(), 1);
+    }
+
+    #[test]
+    fn test_variable_value_queues_exposure_only_once() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.variable_value("button", json!("default"));
+        ctx.variable_value("button", json!("default"));
+        ctx.variable_value("button", json!("default"));
+        assert_eq!(ctx.pending(), 1);
+    }
+
+    #[test]
+    fn test_peek_variable_value_does_not_queue_exposure() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.peek_variable_value("button", json!("default"));
+        assert_eq!(ctx.pending(), 0);
+    }
+
+    #[test]
+    fn test_peek_variable_value_returns_override_values() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.set_override("test_exp", 1);
+
+        let value = ctx.peek_variable_value("button", json!("default"));
+        assert_eq!(value, json!("red"));
+    }
+
+    #[test]
+    fn test_peek_variable_value_returns_default_when_unassigned() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![1.0, 0.0]);
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        let value = ctx.peek_variable_value("button", json!("default"));
+        assert_eq!(value, json!("default"));
+    }
+
+    #[test]
+    fn test_variable_keys_returns_all_active_keys() {
+        let exp1 = make_experiment("exp1", vec!["{}", r#"{"button":"red","header":"large"}"#], vec![0.5, 0.5]);
+        let exp2 = make_experiment("exp2", vec!["{}", r#"{"color":"blue"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp1, exp2]);
+        let ctx = Context::new(data);
+
+        let keys = ctx.variable_keys();
+        assert!(keys.contains_key("button"));
+        assert!(keys.contains_key("header"));
+        assert!(keys.contains_key("color"));
+    }
+
+    #[test]
+    fn test_track_with_null_properties() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+
+        assert!(ctx.track("click", Value::Null).is_ok());
+        assert_eq!(ctx.pending(), 1);
+    }
+
+    #[test]
+    fn test_track_with_number_properties() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+
+        assert!(ctx.track("purchase", json!({"amount": 99.99, "count": 1})).is_ok());
+        assert_eq!(ctx.pending(), 1);
+    }
+
+    #[test]
+    fn test_track_callable_before_ready() {
+        let mut ctx = Context::new_loading();
+        assert!(ctx.track("click", ()).is_ok());
+        assert_eq!(ctx.pending(), 1);
+    }
+
+    #[test]
+    fn test_track_throws_after_finalize() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+        ctx.finalize();
+        assert!(ctx.track("click", ()).is_err());
+    }
+
+    #[test]
+    fn test_publish_does_not_call_when_queue_empty() {
+        let data = make_context_data(vec![]);
+        let (mut ctx, log) = make_logging_context(data);
+
+        ctx.publish();
+
+        let entries = log.lock().unwrap();
+        assert!(!entries.iter().any(|e| e.event == "publish"));
+    }
+
+    #[test]
+    fn test_publish_clears_queue_on_success() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.treatment("test_exp");
+        ctx.track("click", ()).unwrap();
+        assert!(ctx.pending() > 0);
+
+        ctx.publish();
+        assert_eq!(ctx.pending(), 0);
+    }
+
+    #[test]
+    fn test_finalize_does_not_call_publish_when_queue_empty() {
+        let data = make_context_data(vec![]);
+        let (mut ctx, log) = make_logging_context(data);
+
+        ctx.finalize();
+
+        let entries = log.lock().unwrap();
+        assert!(!entries.iter().any(|e| e.event == "publish"));
+        assert!(entries.iter().any(|e| e.event == "finalize"));
+    }
+
+    #[test]
+    fn test_finalize_calls_publish_when_pending() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        let (mut ctx, log) = make_logging_context(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.treatment("test_exp");
+        assert!(ctx.pending() > 0);
+
+        ctx.finalize();
+        assert!(ctx.is_finalized());
+        assert_eq!(ctx.pending(), 0);
+
+        let entries = log.lock().unwrap();
+        assert!(entries.iter().any(|e| e.event == "publish"));
+        assert!(entries.iter().any(|e| e.event == "finalize"));
+    }
+
+    #[test]
+    fn test_finalize_is_idempotent() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+
+        ctx.finalize();
+        assert!(ctx.is_finalized());
+        ctx.finalize();
+        assert!(ctx.is_finalized());
+    }
+
+    #[test]
+    fn test_refresh_keeps_overrides() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp.clone()]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.set_override("test_exp", 1);
+
+        assert_eq!(ctx.treatment("test_exp"), 1);
+
+        let data2 = make_context_data(vec![exp]);
+        ctx.refresh(data2);
+        assert_eq!(ctx.treatment("test_exp"), 1);
+    }
+
+    #[test]
+    fn test_refresh_keeps_custom_assignments() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp.clone()]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.set_custom_assignment("test_exp", 1).unwrap();
+
+        assert_eq!(ctx.treatment("test_exp"), 1);
+
+        let data2 = make_context_data(vec![exp]);
+        ctx.refresh(data2);
+        assert_eq!(ctx.treatment("test_exp"), 1);
+    }
+
+    #[test]
+    fn test_refresh_picks_up_fullon_change() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.treatment("test_exp");
+
+        let mut exp2 = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        exp2.full_on_variant = 1;
+        let data2 = make_context_data(vec![exp2]);
+        ctx.refresh(data2);
+
+        assert_eq!(ctx.treatment("test_exp"), 1);
+    }
+
+    #[test]
+    fn test_refresh_picks_up_traffic_split_change() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.treatment("test_exp");
+
+        let mut exp2 = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        exp2.traffic_split = vec![0.0, 1.0];
+        let data2 = make_context_data(vec![exp2]);
+        ctx.refresh(data2);
+
+        let _variant = ctx.treatment("test_exp");
+        assert!(ctx.pending() > 0);
+    }
+
+    #[test]
+    fn test_refresh_picks_up_iteration_change() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.treatment("test_exp");
+        let pending_before = ctx.pending();
+
+        let mut exp2 = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        exp2.iteration = 2;
+        let data2 = make_context_data(vec![exp2]);
+        ctx.refresh(data2);
+
+        ctx.treatment("test_exp");
+        assert!(ctx.pending() > pending_before);
+    }
+
+    #[test]
+    fn test_refresh_picks_up_id_change() {
+        let exp = make_experiment_with_id("test_exp", 1, vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.treatment("test_exp");
+        let pending_before = ctx.pending();
+
+        let exp2 = make_experiment_with_id("test_exp", 2, vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data2 = make_context_data(vec![exp2]);
+        ctx.refresh(data2);
+
+        ctx.treatment("test_exp");
+        assert!(ctx.pending() > pending_before);
+    }
+
+    #[test]
+    fn test_refresh_no_change_same_variant() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp.clone()]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        let variant1 = ctx.treatment("test_exp");
+        assert_eq!(ctx.pending(), 1);
+
+        let data2 = make_context_data(vec![exp]);
+        ctx.refresh(data2);
+
+        let variant2 = ctx.treatment("test_exp");
+        assert_eq!(variant1, variant2);
+    }
+
+    #[test]
+    fn test_custom_field_keys() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        exp.custom_field_values = Some(vec![
+            CustomFieldValue {
+                name: "country".to_string(),
+                value: "US".to_string(),
+                field_type: "string".to_string(),
+            },
+            CustomFieldValue {
+                name: "overrides".to_string(),
+                value: r#"{"key":"value"}"#.to_string(),
+                field_type: "json".to_string(),
+            },
+        ]);
+        let data = make_context_data(vec![exp]);
+        let ctx = Context::new(data);
+
+        let keys = ctx.custom_field_keys();
+        assert!(keys.contains(&"country".to_string()));
+        assert!(keys.contains(&"overrides".to_string()));
+    }
+
+    #[test]
+    fn test_custom_field_value_string() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        exp.custom_field_values = Some(vec![CustomFieldValue {
+            name: "country".to_string(),
+            value: "US".to_string(),
+            field_type: "string".to_string(),
+        }]);
+        let data = make_context_data(vec![exp]);
+        let ctx = Context::new(data);
+
+        assert_eq!(ctx.custom_field_value("test_exp", "country"), Some(json!("US")));
+    }
+
+    #[test]
+    fn test_custom_field_value_text() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        exp.custom_field_values = Some(vec![CustomFieldValue {
+            name: "description".to_string(),
+            value: "A test experiment".to_string(),
+            field_type: "text".to_string(),
+        }]);
+        let data = make_context_data(vec![exp]);
+        let ctx = Context::new(data);
+
+        assert_eq!(ctx.custom_field_value("test_exp", "description"), Some(json!("A test experiment")));
+    }
+
+    #[test]
+    fn test_custom_field_value_json() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        exp.custom_field_values = Some(vec![CustomFieldValue {
+            name: "overrides".to_string(),
+            value: r#"{"key":"value"}"#.to_string(),
+            field_type: "json".to_string(),
+        }]);
+        let data = make_context_data(vec![exp]);
+        let ctx = Context::new(data);
+
+        assert_eq!(ctx.custom_field_value("test_exp", "overrides"), Some(json!({"key": "value"})));
+    }
+
+    #[test]
+    fn test_custom_field_value_number() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        exp.custom_field_values = Some(vec![CustomFieldValue {
+            name: "priority".to_string(),
+            value: "5".to_string(),
+            field_type: "number".to_string(),
+        }]);
+        let data = make_context_data(vec![exp]);
+        let ctx = Context::new(data);
+
+        assert_eq!(ctx.custom_field_value("test_exp", "priority"), Some(json!(5.0)));
+    }
+
+    #[test]
+    fn test_custom_field_value_decimal() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        exp.custom_field_values = Some(vec![CustomFieldValue {
+            name: "weight".to_string(),
+            value: "1.5".to_string(),
+            field_type: "number".to_string(),
+        }]);
+        let data = make_context_data(vec![exp]);
+        let ctx = Context::new(data);
+
+        assert_eq!(ctx.custom_field_value("test_exp", "weight"), Some(json!(1.5)));
+    }
+
+    #[test]
+    fn test_custom_field_value_boolean() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        exp.custom_field_values = Some(vec![CustomFieldValue {
+            name: "enabled".to_string(),
+            value: "true".to_string(),
+            field_type: "boolean".to_string(),
+        }]);
+        let data = make_context_data(vec![exp]);
+        let ctx = Context::new(data);
+
+        assert_eq!(ctx.custom_field_value("test_exp", "enabled"), Some(json!(true)));
+    }
+
+    #[test]
+    fn test_custom_field_value_boolean_false() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        exp.custom_field_values = Some(vec![CustomFieldValue {
+            name: "enabled".to_string(),
+            value: "false".to_string(),
+            field_type: "boolean".to_string(),
+        }]);
+        let data = make_context_data(vec![exp]);
+        let ctx = Context::new(data);
+
+        assert_eq!(ctx.custom_field_value("test_exp", "enabled"), Some(json!(false)));
+    }
+
+    #[test]
+    fn test_custom_field_value_null_for_nonexistent_field() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        exp.custom_field_values = Some(vec![CustomFieldValue {
+            name: "country".to_string(),
+            value: "US".to_string(),
+            field_type: "string".to_string(),
+        }]);
+        let data = make_context_data(vec![exp]);
+        let ctx = Context::new(data);
+
+        assert_eq!(ctx.custom_field_value("test_exp", "nonexistent"), None);
+    }
+
+    #[test]
+    fn test_custom_field_value_null_for_nonexistent_experiment() {
+        let data = make_context_data(vec![]);
+        let ctx = Context::new(data);
+
+        assert_eq!(ctx.custom_field_value("nonexistent_exp", "field"), None);
+    }
+
+    #[test]
+    fn test_custom_field_value_null_for_experiment_without_custom_fields() {
+        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp]);
+        let ctx = Context::new(data);
+
+        assert_eq!(ctx.custom_field_value("test_exp", "field"), None);
+    }
+
+    #[test]
+    fn test_custom_field_value_type() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        exp.custom_field_values = Some(vec![
+            CustomFieldValue {
+                name: "country".to_string(),
+                value: "US".to_string(),
+                field_type: "string".to_string(),
+            },
+            CustomFieldValue {
+                name: "priority".to_string(),
+                value: "5".to_string(),
+                field_type: "number".to_string(),
+            },
+            CustomFieldValue {
+                name: "enabled".to_string(),
+                value: "true".to_string(),
+                field_type: "boolean".to_string(),
+            },
+        ]);
+        let data = make_context_data(vec![exp]);
+        let ctx = Context::new(data);
+
+        assert_eq!(ctx.custom_field_value_type("test_exp", "country"), Some("string".to_string()));
+        assert_eq!(ctx.custom_field_value_type("test_exp", "priority"), Some("number".to_string()));
+        assert_eq!(ctx.custom_field_value_type("test_exp", "enabled"), Some("boolean".to_string()));
+        assert_eq!(ctx.custom_field_value_type("test_exp", "nonexistent"), None);
+    }
+
+    #[test]
+    fn test_get_attribute_returns_last_set_value() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+
+        ctx.set_attribute("country", json!("US")).unwrap();
+        ctx.set_attribute("country", json!("UK")).unwrap();
+        assert_eq!(ctx.get_attribute("country"), Some(&json!("UK")));
+    }
+
+    #[test]
+    fn test_get_units_returns_all() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+
+        ctx.set_unit("session_id", "user123").unwrap();
+        ctx.set_unit("device_id", "device456").unwrap();
+
+        let units = ctx.get_units();
+        assert_eq!(units.get("session_id"), Some(&"user123".to_string()));
+        assert_eq!(units.get("device_id"), Some(&"device456".to_string()));
+    }
+
+    #[test]
+    fn test_set_units_multiple() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+
+        ctx.set_units([
+            ("session_id", "user123"),
+            ("device_id", "device456"),
+        ]).unwrap();
+
+        assert_eq!(ctx.get_unit("session_id"), Some(&"user123".to_string()));
+        assert_eq!(ctx.get_unit("device_id"), Some(&"device456".to_string()));
+    }
+
+    #[test]
+    fn test_set_overrides_multiple() {
+        let exp1 = make_experiment("exp1", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp2 = make_experiment("exp2", vec!["{}", r#"{"color":"blue"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp1, exp2]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.set_overrides([("exp1", 1), ("exp2", 0)]);
+
+        assert_eq!(ctx.treatment("exp1"), 1);
+        assert_eq!(ctx.treatment("exp2"), 0);
+    }
+
+    #[test]
+    fn test_set_custom_assignments_multiple() {
+        let exp1 = make_experiment("exp1", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp2 = make_experiment("exp2", vec!["{}", r#"{"color":"blue"}"#], vec![0.5, 0.5]);
+        let data = make_context_data(vec![exp1, exp2]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+
+        ctx.set_custom_assignments([("exp1", 1), ("exp2", 0)]).unwrap();
+
+        assert_eq!(ctx.treatment("exp1"), 1);
+        assert_eq!(ctx.treatment("exp2"), 0);
+    }
+
+    #[test]
+    fn test_set_attributes_throws_after_finalize() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+        ctx.finalize();
+
+        assert!(ctx.set_attributes([("country", json!("US"))]).is_err());
+    }
+
+    #[test]
+    fn test_set_custom_assignments_throws_after_finalize() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+        ctx.finalize();
+
+        assert!(ctx.set_custom_assignments([("exp1", 1)]).is_err());
+    }
+
+    #[test]
+    fn test_get_attributes_returns_all() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+
+        ctx.set_attribute("country", json!("US")).unwrap();
+        ctx.set_attribute("age", json!(25)).unwrap();
+
+        let attrs = ctx.get_attributes();
+        assert_eq!(attrs.get("country"), Some(&json!("US")));
+        assert_eq!(attrs.get("age"), Some(&json!(25)));
+    }
+
+    #[test]
+    fn test_data_returns_context_data() {
+        let exp = make_experiment("exp1", vec!["{}"], vec![1.0]);
+        let data = make_context_data(vec![exp]);
+        let ctx = Context::new(data);
+
+        let ctx_data = ctx.data();
+        assert_eq!(ctx_data.experiments.len(), 1);
+        assert_eq!(ctx_data.experiments[0].name, "exp1");
+    }
+
+    #[test]
+    fn test_context_not_finalizing_initially() {
+        let data = make_context_data(vec![]);
+        let ctx = Context::new(data);
+        assert!(!ctx.is_finalizing());
+    }
+
+    #[test]
+    fn test_custom_field_value_json_null() {
+        let mut exp = make_experiment("test_exp", vec!["{}"], vec![1.0]);
+        exp.custom_field_values = Some(vec![CustomFieldValue {
+            name: "nullfield".to_string(),
+            value: "null".to_string(),
+            field_type: "json".to_string(),
+        }]);
+        let data = make_context_data(vec![exp]);
+        let ctx = Context::new(data);
+
+        assert_eq!(ctx.custom_field_value("test_exp", "nullfield"), Some(Value::Null));
+    }
+
+    #[test]
+    fn test_variable_value_audience_mismatch_strict_returns_default() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
+        exp.audience_strict = true;
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.set_attribute("country", json!("UK")).unwrap();
+
+        let value = ctx.variable_value("button", json!("default"));
+        assert_eq!(value, json!("default"));
+    }
+
+    #[test]
+    fn test_variable_value_audience_match_returns_value() {
+        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
+        exp.audience_strict = true;
+        let data = make_context_data(vec![exp]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.set_attribute("country", json!("US")).unwrap();
+
+        let value = ctx.variable_value("button", json!("default"));
+        assert_eq!(value, json!("red"));
     }
 }

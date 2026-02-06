@@ -8,6 +8,6 @@ pub mod models;
 pub mod context;
 pub mod sdk;
 
-pub use sdk::{SDK, SDKConfig, SDKError};
+pub use sdk::{ABsmartly, ABsmartlyBuilder, SDKConfig, SDKError};
 pub use context::Context;
 pub use models::*;

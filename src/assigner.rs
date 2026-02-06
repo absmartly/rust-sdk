@@ -30,37 +30,79 @@ impl VariantAssigner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::hash_unit;
+    use crate::utils::{choose_variant, hash_unit};
 
     #[test]
-    fn test_assigner_bleh_email() {
-        let hashed_unit = hash_unit("bleh@absmartly.com");
-        let assigner = VariantAssigner::new(&hashed_unit);
-        let variant = assigner.assign(&[0.5, 0.5], 0x00000000, 0x00000000);
-        assert_eq!(variant, 0);
+    fn test_choose_variant_returns_correct_index() {
+        assert_eq!(choose_variant(&[0.0, 1.0], 0.0), 1);
+        assert_eq!(choose_variant(&[0.0, 1.0], 0.5), 1);
+        assert_eq!(choose_variant(&[1.0, 0.0], 0.0), 0);
+        assert_eq!(choose_variant(&[0.5, 0.5], 0.0), 0);
+        assert_eq!(choose_variant(&[0.5, 0.5], 0.25), 0);
+        assert_eq!(choose_variant(&[0.5, 0.5], 0.49999999), 0);
+        assert_eq!(choose_variant(&[0.5, 0.5], 0.5), 1);
+        assert_eq!(choose_variant(&[0.5, 0.5], 0.50000001), 1);
+        assert_eq!(choose_variant(&[0.333, 0.333, 0.334], 0.0), 0);
+        assert_eq!(choose_variant(&[0.333, 0.333, 0.334], 0.333), 1);
+        assert_eq!(choose_variant(&[0.333, 0.333, 0.334], 0.666), 2);
     }
 
-    #[test]
-    fn test_assigner_bleh_email_different_seed() {
-        let hashed_unit = hash_unit("bleh@absmartly.com");
-        let assigner = VariantAssigner::new(&hashed_unit);
-        let variant = assigner.assign(&[0.5, 0.5], 0x00000000, 0x00000001);
-        assert_eq!(variant, 1);
+    macro_rules! assignment_test {
+        ($name:ident, $unit:expr, $split:expr, $seed_hi:expr, $seed_lo:expr, $expected:expr) => {
+            #[test]
+            fn $name() {
+                let hashed_unit = hash_unit($unit);
+                let assigner = VariantAssigner::new(&hashed_unit);
+                assert_eq!(assigner.assign($split, $seed_hi, $seed_lo), $expected);
+            }
+        };
     }
 
-    #[test]
-    fn test_assigner_123456789() {
-        let hashed_unit = hash_unit("123456789");
-        let assigner = VariantAssigner::new(&hashed_unit);
-        assert_eq!(assigner.assign(&[0.5, 0.5], 0x00000000, 0x00000000), 1);
-        assert_eq!(assigner.assign(&[0.5, 0.5], 0x00000000, 0x00000001), 0);
-    }
+    assignment_test!(test_bleh_binary_s0_s0, "bleh@absmartly.com", &[0.5, 0.5], 0x00000000, 0x00000000, 0);
+    assignment_test!(test_bleh_binary_s0_s1, "bleh@absmartly.com", &[0.5, 0.5], 0x00000000, 0x00000001, 1);
+    assignment_test!(test_bleh_binary_sp1, "bleh@absmartly.com", &[0.5, 0.5], 0x8015406f, 0x7ef49b98, 0);
+    assignment_test!(test_bleh_binary_sp2, "bleh@absmartly.com", &[0.5, 0.5], 0x3b2e7d90, 0xca87df4d, 0);
+    assignment_test!(test_bleh_binary_sp3, "bleh@absmartly.com", &[0.5, 0.5], 0x52c1f657, 0xd248bb2e, 0);
+    assignment_test!(test_bleh_binary_sp4, "bleh@absmartly.com", &[0.5, 0.5], 0x865a84d0, 0xaa22d41a, 0);
+    assignment_test!(test_bleh_binary_sp5, "bleh@absmartly.com", &[0.5, 0.5], 0x27d1dc86, 0x845461b9, 1);
 
-    #[test]
-    fn test_assigner_three_way_split() {
-        let hashed_unit = hash_unit("bleh@absmartly.com");
-        let assigner = VariantAssigner::new(&hashed_unit);
-        let variant = assigner.assign(&[0.33, 0.33, 0.34], 0x00000000, 0x00000001);
-        assert_eq!(variant, 2);
-    }
+    assignment_test!(test_bleh_three_s0_s0, "bleh@absmartly.com", &[0.33, 0.33, 0.34], 0x00000000, 0x00000000, 0);
+    assignment_test!(test_bleh_three_s0_s1, "bleh@absmartly.com", &[0.33, 0.33, 0.34], 0x00000000, 0x00000001, 2);
+    assignment_test!(test_bleh_three_sp1, "bleh@absmartly.com", &[0.33, 0.33, 0.34], 0x8015406f, 0x7ef49b98, 0);
+    assignment_test!(test_bleh_three_sp2, "bleh@absmartly.com", &[0.33, 0.33, 0.34], 0x3b2e7d90, 0xca87df4d, 0);
+    assignment_test!(test_bleh_three_sp3, "bleh@absmartly.com", &[0.33, 0.33, 0.34], 0x52c1f657, 0xd248bb2e, 0);
+    assignment_test!(test_bleh_three_sp4, "bleh@absmartly.com", &[0.33, 0.33, 0.34], 0x865a84d0, 0xaa22d41a, 1);
+    assignment_test!(test_bleh_three_sp5, "bleh@absmartly.com", &[0.33, 0.33, 0.34], 0x27d1dc86, 0x845461b9, 1);
+
+    assignment_test!(test_num_binary_s0_s0, "123456789", &[0.5, 0.5], 0x00000000, 0x00000000, 1);
+    assignment_test!(test_num_binary_s0_s1, "123456789", &[0.5, 0.5], 0x00000000, 0x00000001, 0);
+    assignment_test!(test_num_binary_sp1, "123456789", &[0.5, 0.5], 0x8015406f, 0x7ef49b98, 1);
+    assignment_test!(test_num_binary_sp2, "123456789", &[0.5, 0.5], 0x3b2e7d90, 0xca87df4d, 1);
+    assignment_test!(test_num_binary_sp3, "123456789", &[0.5, 0.5], 0x52c1f657, 0xd248bb2e, 1);
+    assignment_test!(test_num_binary_sp4, "123456789", &[0.5, 0.5], 0x865a84d0, 0xaa22d41a, 0);
+    assignment_test!(test_num_binary_sp5, "123456789", &[0.5, 0.5], 0x27d1dc86, 0x845461b9, 0);
+
+    assignment_test!(test_num_three_s0_s0, "123456789", &[0.33, 0.33, 0.34], 0x00000000, 0x00000000, 2);
+    assignment_test!(test_num_three_s0_s1, "123456789", &[0.33, 0.33, 0.34], 0x00000000, 0x00000001, 1);
+    assignment_test!(test_num_three_sp1, "123456789", &[0.33, 0.33, 0.34], 0x8015406f, 0x7ef49b98, 2);
+    assignment_test!(test_num_three_sp2, "123456789", &[0.33, 0.33, 0.34], 0x3b2e7d90, 0xca87df4d, 2);
+    assignment_test!(test_num_three_sp3, "123456789", &[0.33, 0.33, 0.34], 0x52c1f657, 0xd248bb2e, 2);
+    assignment_test!(test_num_three_sp4, "123456789", &[0.33, 0.33, 0.34], 0x865a84d0, 0xaa22d41a, 0);
+    assignment_test!(test_num_three_sp5, "123456789", &[0.33, 0.33, 0.34], 0x27d1dc86, 0x845461b9, 0);
+
+    assignment_test!(test_hash_binary_s0_s0, "e791e240fcd3df7d238cfc285f475e8152fcc0ec", &[0.5, 0.5], 0x00000000, 0x00000000, 1);
+    assignment_test!(test_hash_binary_s0_s1, "e791e240fcd3df7d238cfc285f475e8152fcc0ec", &[0.5, 0.5], 0x00000000, 0x00000001, 0);
+    assignment_test!(test_hash_binary_sp1, "e791e240fcd3df7d238cfc285f475e8152fcc0ec", &[0.5, 0.5], 0x8015406f, 0x7ef49b98, 1);
+    assignment_test!(test_hash_binary_sp2, "e791e240fcd3df7d238cfc285f475e8152fcc0ec", &[0.5, 0.5], 0x3b2e7d90, 0xca87df4d, 1);
+    assignment_test!(test_hash_binary_sp3, "e791e240fcd3df7d238cfc285f475e8152fcc0ec", &[0.5, 0.5], 0x52c1f657, 0xd248bb2e, 0);
+    assignment_test!(test_hash_binary_sp4, "e791e240fcd3df7d238cfc285f475e8152fcc0ec", &[0.5, 0.5], 0x865a84d0, 0xaa22d41a, 0);
+    assignment_test!(test_hash_binary_sp5, "e791e240fcd3df7d238cfc285f475e8152fcc0ec", &[0.5, 0.5], 0x27d1dc86, 0x845461b9, 0);
+
+    assignment_test!(test_hash_three_s0_s0, "e791e240fcd3df7d238cfc285f475e8152fcc0ec", &[0.33, 0.33, 0.34], 0x00000000, 0x00000000, 2);
+    assignment_test!(test_hash_three_s0_s1, "e791e240fcd3df7d238cfc285f475e8152fcc0ec", &[0.33, 0.33, 0.34], 0x00000000, 0x00000001, 0);
+    assignment_test!(test_hash_three_sp1, "e791e240fcd3df7d238cfc285f475e8152fcc0ec", &[0.33, 0.33, 0.34], 0x8015406f, 0x7ef49b98, 2);
+    assignment_test!(test_hash_three_sp2, "e791e240fcd3df7d238cfc285f475e8152fcc0ec", &[0.33, 0.33, 0.34], 0x3b2e7d90, 0xca87df4d, 1);
+    assignment_test!(test_hash_three_sp3, "e791e240fcd3df7d238cfc285f475e8152fcc0ec", &[0.33, 0.33, 0.34], 0x52c1f657, 0xd248bb2e, 0);
+    assignment_test!(test_hash_three_sp4, "e791e240fcd3df7d238cfc285f475e8152fcc0ec", &[0.33, 0.33, 0.34], 0x865a84d0, 0xaa22d41a, 0);
+    assignment_test!(test_hash_three_sp5, "e791e240fcd3df7d238cfc285f475e8152fcc0ec", &[0.33, 0.33, 0.34], 0x27d1dc86, 0x845461b9, 1);
 }

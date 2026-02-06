@@ -61,51 +61,51 @@ pub fn murmur3_32(key: &[u8], seed: u32) -> u32 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_empty_string() {
-        assert_eq!(murmur3_32(b"", 0), 0x00000000);
+    macro_rules! murmur3_test {
+        ($name:ident, $input:expr, $seed:expr, $expected:expr) => {
+            #[test]
+            fn $name() {
+                assert_eq!(murmur3_32($input.as_bytes(), $seed), $expected);
+            }
+        };
     }
 
-    #[test]
-    fn test_space() {
-        assert_eq!(murmur3_32(b" ", 0), 0x7ef49b98);
-    }
+    murmur3_test!(test_seed0_empty, "", 0x00000000, 0x00000000);
+    murmur3_test!(test_seed0_space, " ", 0x00000000, 0x7ef49b98);
+    murmur3_test!(test_seed0_t, "t", 0x00000000, 0xca87df4d);
+    murmur3_test!(test_seed0_te, "te", 0x00000000, 0xedb8ee1b);
+    murmur3_test!(test_seed0_tes, "tes", 0x00000000, 0x0bb90e5a);
+    murmur3_test!(test_seed0_test, "test", 0x00000000, 0xba6bd213);
+    murmur3_test!(test_seed0_testy, "testy", 0x00000000, 0x44af8342);
+    murmur3_test!(test_seed0_testy1, "testy1", 0x00000000, 0x8a1a243a);
+    murmur3_test!(test_seed0_testy12, "testy12", 0x00000000, 0x845461b9);
+    murmur3_test!(test_seed0_testy123, "testy123", 0x00000000, 0x47628ac4);
+    murmur3_test!(test_seed0_special, "special characters a\u{00e7}b\u{2193}c", 0x00000000, 0xbe83b140);
+    murmur3_test!(test_seed0_fox, "The quick brown fox jumps over the lazy dog", 0x00000000, 0x2e4ff723);
 
-    #[test]
-    fn test_single_char() {
-        assert_eq!(murmur3_32(b"t", 0), 0xca87df4d);
-    }
+    murmur3_test!(test_deadbeef_empty, "", 0xdeadbeef, 0x0de5c6a9);
+    murmur3_test!(test_deadbeef_space, " ", 0xdeadbeef, 0x25acce43);
+    murmur3_test!(test_deadbeef_t, "t", 0xdeadbeef, 0x3b15dcf8);
+    murmur3_test!(test_deadbeef_te, "te", 0xdeadbeef, 0xac981332);
+    murmur3_test!(test_deadbeef_tes, "tes", 0xdeadbeef, 0xc1c78dda);
+    murmur3_test!(test_deadbeef_test, "test", 0xdeadbeef, 0xaa22d41a);
+    murmur3_test!(test_deadbeef_testy, "testy", 0xdeadbeef, 0x84f5f623);
+    murmur3_test!(test_deadbeef_testy1, "testy1", 0xdeadbeef, 0x09ed28e9);
+    murmur3_test!(test_deadbeef_testy12, "testy12", 0xdeadbeef, 0x22467835);
+    murmur3_test!(test_deadbeef_testy123, "testy123", 0xdeadbeef, 0xd633060d);
+    murmur3_test!(test_deadbeef_special, "special characters a\u{00e7}b\u{2193}c", 0xdeadbeef, 0xf7fdd8a2);
+    murmur3_test!(test_deadbeef_fox, "The quick brown fox jumps over the lazy dog", 0xdeadbeef, 0x3a7b3f4d);
 
-    #[test]
-    fn test_two_chars() {
-        assert_eq!(murmur3_32(b"te", 0), 0xedb8ee1b);
-    }
-
-    #[test]
-    fn test_three_chars() {
-        assert_eq!(murmur3_32(b"tes", 0), 0x0bb90e5a);
-    }
-
-    #[test]
-    fn test_four_chars() {
-        assert_eq!(murmur3_32(b"test", 0), 0xba6bd213);
-    }
-
-    #[test]
-    fn test_with_seed_deadbeef() {
-        assert_eq!(murmur3_32(b"test", 0xdeadbeef), 0xaa22d41a);
-    }
-
-    #[test]
-    fn test_with_seed_1() {
-        assert_eq!(murmur3_32(b"test", 1), 0x99c02ae2);
-    }
-
-    #[test]
-    fn test_long_string() {
-        assert_eq!(
-            murmur3_32(b"The quick brown fox jumps over the lazy dog", 0),
-            0x2e4ff723
-        );
-    }
+    murmur3_test!(test_seed1_empty, "", 0x00000001, 0x514e28b7);
+    murmur3_test!(test_seed1_space, " ", 0x00000001, 0x4f0f7132);
+    murmur3_test!(test_seed1_t, "t", 0x00000001, 0x5db1831e);
+    murmur3_test!(test_seed1_te, "te", 0x00000001, 0xd248bb2e);
+    murmur3_test!(test_seed1_tes, "tes", 0x00000001, 0xd432eb74);
+    murmur3_test!(test_seed1_test, "test", 0x00000001, 0x99c02ae2);
+    murmur3_test!(test_seed1_testy, "testy", 0x00000001, 0xc5b2dc1e);
+    murmur3_test!(test_seed1_testy1, "testy1", 0x00000001, 0x33925ceb);
+    murmur3_test!(test_seed1_testy12, "testy12", 0x00000001, 0xd92c9f23);
+    murmur3_test!(test_seed1_testy123, "testy123", 0x00000001, 0x3bc1712d);
+    murmur3_test!(test_seed1_special, "special characters a\u{00e7}b\u{2193}c", 0x00000001, 0x293327b5);
+    murmur3_test!(test_seed1_fox, "The quick brown fox jumps over the lazy dog", 0x00000001, 0x78e69e27);
 }
