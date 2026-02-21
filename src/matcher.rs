@@ -20,11 +20,18 @@ impl AudienceMatcher {
                 if let Some(filter) = audience.get("filter") {
                     if filter.is_array() || filter.is_object() {
                         return self.json_expr.evaluate_boolean_expr(filter, vars);
+                    } else {
+                        eprintln!("WARNING: Audience filter is not an array or object: {:?}", filter);
                     }
+                } else {
+                    eprintln!("WARNING: No 'filter' field found in audience JSON");
                 }
                 None
             }
-            Err(_) => None,
+            Err(e) => {
+                eprintln!("ERROR: Failed to parse audience JSON: {}. Input: '{}'", e, audience_string);
+                None
+            }
         }
     }
 }

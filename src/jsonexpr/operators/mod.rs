@@ -1,4 +1,4 @@
-use regex::Regex;
+use regex::RegexBuilder;
 use serde_json::Value;
 
 use super::evaluator::{values_equal_deep, Evaluator};
@@ -88,11 +88,20 @@ pub fn match_op(evaluator: &Evaluator, args: &Value) -> Value {
             evaluator.string_convert(&text),
             evaluator.string_convert(&pattern),
         ) {
-            if let Ok(regex) = Regex::new(&pattern_str) {
-                return Value::Bool(regex.is_match(&text_str));
+            match RegexBuilder::new(&pattern_str)
+                .size_limit(10_000)
+                .dfa_size_limit(1_000_000)
+                .build()
+            {
+                Ok(regex) => Value::Bool(regex.is_match(&text_str)),
+                Err(e) => {
+                    eprintln!("ERROR: Invalid regex pattern '{}': {}", pattern_str, e);
+                    Value::Null
+                }
             }
+        } else {
+            Value::Bool(false)
         }
-        Value::Bool(false)
     } else {
         Value::Bool(false)
     }

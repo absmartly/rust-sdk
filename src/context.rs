@@ -107,7 +107,7 @@ impl Context {
         for experiment in &self.data.experiments {
             let mut variables: Vec<HashMap<String, Value>> = Vec::new();
 
-            for variant in &experiment.variants {
+            for (variant_idx, variant) in experiment.variants.iter().enumerate() {
                 let parsed: HashMap<String, Value> = variant
                     .config
                     .as_ref()
@@ -115,7 +115,16 @@ impl Context {
                         if c.is_empty() {
                             None
                         } else {
-                            serde_json::from_str(c).ok()
+                            match serde_json::from_str(c) {
+                                Ok(v) => Some(v),
+                                Err(e) => {
+                                    eprintln!(
+                                        "ERROR: Failed to parse variant config for experiment '{}', variant {}: {}. Config: '{}'",
+                                        experiment.name, variant_idx, e, c
+                                    );
+                                    None
+                                }
+                            }
                         }
                     })
                     .unwrap_or_default();
@@ -265,18 +274,26 @@ impl Context {
         attrs
     }
 
-    pub fn set_override(&mut self, experiment_name: &str, variant: i32) {
+    pub fn set_override(&mut self, experiment_name: &str, variant: i32) -> Result<(), String> {
+        if self.is_finalized() {
+            return Err("ABsmartly Context is finalized.".to_string());
+        }
+        if self.is_finalizing() {
+            return Err("ABsmartly Context is finalizing.".to_string());
+        }
         self.overrides.insert(experiment_name.to_string(), variant);
+        Ok(())
     }
 
-    pub fn set_overrides<I, K>(&mut self, overrides: I)
+    pub fn set_overrides<I, K>(&mut self, overrides: I) -> Result<(), String>
     where
         I: IntoIterator<Item = (K, i32)>,
         K: Into<String>,
     {
         for (experiment_name, variant) in overrides {
-            self.overrides.insert(experiment_name.into(), variant);
+            self.set_override(&experiment_name.into(), variant)?;
         }
+        Ok(())
     }
 
     pub fn set_custom_assignment(&mut self, experiment_name: &str, variant: i32) -> Result<(), String> {
@@ -340,7 +357,12 @@ impl Context {
             achieved_at: now_millis(),
         };
 
-        self.log_event("goal", Some(serde_json::to_value(&goal).unwrap_or_default()));
+        match serde_json::to_value(&goal) {
+            Ok(value) => self.log_event("goal", Some(value)),
+            Err(e) => {
+                eprintln!("ERROR: Failed to serialize goal '{}': {}", goal_name, e);
+            }
+        }
         self.goals.push(goal);
         self.pending += 1;
 
@@ -400,22 +422,38 @@ impl Context {
                 if let Some(field) = custom_fields.iter().find(|f| f.name == field_name) {
                     return match field.field_type.as_str() {
                         "text" | "string" => Some(Value::String(field.value.clone())),
-                        "number" => field.value.parse::<f64>().ok().map(|n| {
-                            serde_json::Number::from_f64(n)
+                        "number" => match field.value.parse::<f64>() {
+                            Ok(n) => serde_json::Number::from_f64(n)
                                 .map(Value::Number)
-                                .unwrap_or(Value::Null)
-                        }),
+                                .or_else(|| {
+                                    eprintln!("WARNING: Custom field '{}' number out of range: {}", field_name, n);
+                                    Some(Value::Null)
+                                }),
+                            Err(e) => {
+                                eprintln!("ERROR: Failed to parse custom field '{}' as number: {}. Value: '{}'", field_name, e, field.value);
+                                None
+                            }
+                        },
                         "json" => {
                             if field.value == "null" {
                                 Some(Value::Null)
                             } else if field.value.is_empty() {
                                 Some(Value::String(String::new()))
                             } else {
-                                serde_json::from_str(&field.value).ok()
+                                match serde_json::from_str(&field.value) {
+                                    Ok(v) => Some(v),
+                                    Err(e) => {
+                                        eprintln!("ERROR: Failed to parse custom field '{}' JSON: {}. Value: '{}'", field_name, e, field.value);
+                                        None
+                                    }
+                                }
                             }
                         }
                         "boolean" => Some(Value::Bool(field.value == "true")),
-                        _ => None,
+                        _ => {
+                            eprintln!("WARNING: Unknown custom field type '{}' for field '{}'", field.field_type, field_name);
+                            None
+                        }
                     };
                 }
             }
@@ -453,7 +491,12 @@ impl Context {
     pub fn refresh(&mut self, new_data: ContextData) {
         self.assignments.clear();
         self.init(new_data);
-        self.log_event("refresh", Some(serde_json::to_value(&self.data).unwrap_or_default()));
+        match serde_json::to_value(&self.data) {
+            Ok(value) => self.log_event("refresh", Some(value)),
+            Err(e) => {
+                eprintln!("ERROR: Failed to serialize context data for refresh: {}", e);
+            }
+        }
     }
 
     pub fn publish(&mut self) {
@@ -462,11 +505,22 @@ impl Context {
         }
 
         let params = self.build_publish_params();
-        self.log_event("publish", Some(serde_json::to_value(&params).unwrap_or_default()));
+
+        match serde_json::to_value(&params) {
+            Ok(value) => self.log_event("publish", Some(value)),
+            Err(e) => {
+                eprintln!("ERROR: Failed to serialize publish params: {}", e);
+                return;
+            }
+        }
 
         self.pending = 0;
         self.exposures.clear();
         self.goals.clear();
+    }
+
+    pub fn get_publish_params(&self) -> PublishParams {
+        self.build_publish_params()
     }
 
     pub fn finalize(&mut self) {
@@ -636,7 +690,12 @@ impl Context {
                 audience_mismatch: assignment.audience_mismatch,
             };
 
-            self.log_event("exposure", Some(serde_json::to_value(&exposure).unwrap_or_default()));
+            match serde_json::to_value(&exposure) {
+                Ok(value) => self.log_event("exposure", Some(value)),
+                Err(e) => {
+                    eprintln!("ERROR: Failed to serialize exposure for experiment '{}': {}", experiment_name, e);
+                }
+            }
             self.exposures.push(exposure);
             self.pending += 1;
         }
@@ -699,7 +758,10 @@ fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .unwrap_or_else(|e| {
+            eprintln!("WARNING: System time error, returning 0: {}", e);
+            0
+        })
 }
 
 #[cfg(test)]
@@ -859,7 +921,7 @@ mod tests {
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
 
-        context.set_override("test_exp", 1);
+        let _ = context.set_override("test_exp", 1);
         context.set_unit("session_id", "test_user").unwrap();
 
         assert_eq!(context.treatment("test_exp"), 1);
@@ -1312,7 +1374,7 @@ mod tests {
     #[test]
     fn test_set_override_callable_before_ready() {
         let mut ctx = Context::new_loading();
-        ctx.set_override("exp1", 1);
+        let _ = ctx.set_override("exp1", 1);
 
         let exp = make_experiment("exp1", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
         let data = make_context_data(vec![exp]);
@@ -1364,7 +1426,7 @@ mod tests {
         let data = make_context_data(vec![exp]);
         let (mut ctx, log) = make_logging_context(data);
         ctx.set_unit("session_id", "test_user").unwrap();
-        ctx.set_override("test_exp", 1);
+        let _ = ctx.set_override("test_exp", 1);
 
         ctx.treatment("test_exp");
         assert_eq!(ctx.pending(), 1);
@@ -1421,7 +1483,7 @@ mod tests {
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
-        ctx.set_override("test_exp", 1);
+        let _ = ctx.set_override("test_exp", 1);
 
         assert_eq!(ctx.peek("test_exp"), 1);
         assert_eq!(ctx.pending(), 0);
@@ -1527,7 +1589,7 @@ mod tests {
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
-        ctx.set_override("test_exp", 1);
+        let _ = ctx.set_override("test_exp", 1);
 
         let value = ctx.variable_value("button", json!("default"));
         assert_eq!(value, json!("red"));
@@ -1588,7 +1650,7 @@ mod tests {
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
-        ctx.set_override("test_exp", 1);
+        let _ = ctx.set_override("test_exp", 1);
 
         let value = ctx.peek_variable_value("button", json!("default"));
         assert_eq!(value, json!("red"));
@@ -1725,7 +1787,7 @@ mod tests {
         let data = make_context_data(vec![exp.clone()]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
-        ctx.set_override("test_exp", 1);
+        let _ = ctx.set_override("test_exp", 1);
 
         assert_eq!(ctx.treatment("test_exp"), 1);
 
@@ -2064,7 +2126,7 @@ mod tests {
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
 
-        ctx.set_overrides([("exp1", 1), ("exp2", 0)]);
+        let _ = ctx.set_overrides([("exp1", 1), ("exp2", 0)]);
 
         assert_eq!(ctx.treatment("exp1"), 1);
         assert_eq!(ctx.treatment("exp2"), 0);

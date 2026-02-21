@@ -1,5 +1,5 @@
 use crate::context::Context;
-use crate::models::{ContextData, ContextOptions};
+use crate::models::{ContextData, ContextOptions, PublishParams};
 use reqwest::Client;
 
 #[derive(Debug, Clone)]
@@ -203,7 +203,10 @@ impl ABsmartly {
         let mut last_error = None;
 
         while retries > 0 {
-            let response = self.client.get(&url).send().await;
+            let response = self.client.get(&url)
+                .header("X-API-Key", &self.config.api_key)
+                .send()
+                .await;
 
             match response {
                 Ok(resp) => {
@@ -215,10 +218,10 @@ impl ABsmartly {
                         last_error = Some(SDKError::HttpError(
                             resp.error_for_status().unwrap_err(),
                         ));
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            50 * (2_u64.pow((self.config.retries.unwrap_or(5) - retries) as u32)),
-                        ))
-                        .await;
+                        let max_retries = self.config.retries.unwrap_or(5);
+                        let attempt = (max_retries - retries).min(10);
+                        let backoff_ms = 50u64.saturating_mul(2u64.saturating_pow(attempt as u32));
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                         continue;
                     } else {
                         return Err(SDKError::HttpError(resp.error_for_status().unwrap_err()));
@@ -228,10 +231,10 @@ impl ABsmartly {
                     retries -= 1;
                     last_error = Some(SDKError::HttpError(e));
                     if retries > 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            50 * (2_u64.pow((self.config.retries.unwrap_or(5) - retries) as u32)),
-                        ))
-                        .await;
+                        let max_retries = self.config.retries.unwrap_or(5);
+                        let attempt = (max_retries - retries).min(10);
+                        let backoff_ms = 50u64.saturating_mul(2u64.saturating_pow(attempt as u32));
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                     }
                 }
             }
@@ -268,9 +271,30 @@ impl ABsmartly {
     ) -> Context {
         let mut context = Context::new(data);
         for (unit_type, uid) in units {
-            let _ = context.set_unit(&unit_type, &uid);
+            if let Err(e) = context.set_unit(&unit_type, &uid) {
+                eprintln!("WARNING: Failed to set unit '{}': {}", unit_type, e);
+            }
         }
         context
+    }
+
+    pub async fn publish(&self, params: &PublishParams) -> Result<(), SDKError> {
+        let url = format!("{}/", self.config.endpoint.trim_end_matches('/'));
+
+        let response = self
+            .client
+            .post(&url)
+            .header("X-API-Key", &self.config.api_key)
+            .header("Content-Type", "application/json")
+            .json(params)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(SDKError::HttpError(response.error_for_status().unwrap_err()))
+        }
     }
 }
 
