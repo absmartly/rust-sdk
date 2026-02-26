@@ -1,3 +1,4 @@
+use log::{error, warn};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,6 +33,8 @@ pub struct Context {
     hashes: HashMap<String, String>,
     audience_matcher: AudienceMatcher,
     event_logger: Option<EventLogger>,
+    publish_delay: i64,
+    refresh_period: i64,
 }
 
 impl Context {
@@ -54,6 +57,35 @@ impl Context {
             hashes: HashMap::new(),
             audience_matcher: AudienceMatcher::new(),
             event_logger: None,
+            publish_delay: 0,
+            refresh_period: 0,
+        };
+        ctx.init(data);
+        ctx.state = ContextState::Ready;
+        ctx
+    }
+
+    pub fn new_with_options(data: ContextData, options: ContextOptions) -> Self {
+        let mut ctx = Self {
+            units: HashMap::new(),
+            attrs: Vec::new(),
+            data: ContextData::default(),
+            assignments: HashMap::new(),
+            exposures: Vec::new(),
+            goals: Vec::new(),
+            overrides: HashMap::new(),
+            cassignments: HashMap::new(),
+            state: ContextState::Loading,
+            pending: 0,
+            attrs_seq: 0,
+            index: HashMap::new(),
+            index_variables: HashMap::new(),
+            assigners: HashMap::new(),
+            hashes: HashMap::new(),
+            audience_matcher: AudienceMatcher::new(),
+            event_logger: options.event_logger,
+            publish_delay: options.publish_delay,
+            refresh_period: options.refresh_period,
         };
         ctx.init(data);
         ctx.state = ContextState::Ready;
@@ -79,6 +111,8 @@ impl Context {
             hashes: HashMap::new(),
             audience_matcher: AudienceMatcher::new(),
             event_logger: None,
+            publish_delay: 0,
+            refresh_period: 0,
         }
     }
 
@@ -97,6 +131,14 @@ impl Context {
 
     pub fn set_event_logger(&mut self, logger: EventLogger) {
         self.event_logger = Some(logger);
+    }
+
+    pub fn publish_delay(&self) -> i64 {
+        self.publish_delay
+    }
+
+    pub fn refresh_period(&self) -> i64 {
+        self.refresh_period
     }
 
     fn init(&mut self, data: ContextData) {
@@ -118,8 +160,8 @@ impl Context {
                             match serde_json::from_str(c) {
                                 Ok(v) => Some(v),
                                 Err(e) => {
-                                    eprintln!(
-                                        "ERROR: Failed to parse variant config for experiment '{}', variant {}: {}. Config: '{}'",
+                                    error!(
+                                        "Failed to parse variant config for experiment '{}', variant {}: {}. Config: '{}'",
                                         experiment.name, variant_idx, e, c
                                     );
                                     None
@@ -360,7 +402,7 @@ impl Context {
         match serde_json::to_value(&goal) {
             Ok(value) => self.log_event("goal", Some(value)),
             Err(e) => {
-                eprintln!("ERROR: Failed to serialize goal '{}': {}", goal_name, e);
+                error!("Failed to serialize goal '{}': {}", goal_name, e);
             }
         }
         self.goals.push(goal);
@@ -426,11 +468,11 @@ impl Context {
                             Ok(n) => serde_json::Number::from_f64(n)
                                 .map(Value::Number)
                                 .or_else(|| {
-                                    eprintln!("WARNING: Custom field '{}' number out of range: {}", field_name, n);
+                                    warn!("Custom field '{}' number out of range: {}", field_name, n);
                                     Some(Value::Null)
                                 }),
                             Err(e) => {
-                                eprintln!("ERROR: Failed to parse custom field '{}' as number: {}. Value: '{}'", field_name, e, field.value);
+                                error!("Failed to parse custom field '{}' as number: {}. Value: '{}'", field_name, e, field.value);
                                 None
                             }
                         },
@@ -443,7 +485,7 @@ impl Context {
                                 match serde_json::from_str(&field.value) {
                                     Ok(v) => Some(v),
                                     Err(e) => {
-                                        eprintln!("ERROR: Failed to parse custom field '{}' JSON: {}. Value: '{}'", field_name, e, field.value);
+                                        error!("Failed to parse custom field '{}' JSON: {}. Value: '{}'", field_name, e, field.value);
                                         None
                                     }
                                 }
@@ -451,7 +493,7 @@ impl Context {
                         }
                         "boolean" => Some(Value::Bool(field.value == "true")),
                         _ => {
-                            eprintln!("WARNING: Unknown custom field type '{}' for field '{}'", field.field_type, field_name);
+                            warn!("Unknown custom field type '{}' for field '{}'", field.field_type, field_name);
                             None
                         }
                     };
@@ -494,7 +536,7 @@ impl Context {
         match serde_json::to_value(&self.data) {
             Ok(value) => self.log_event("refresh", Some(value)),
             Err(e) => {
-                eprintln!("ERROR: Failed to serialize context data for refresh: {}", e);
+                error!("Failed to serialize context data for refresh: {}", e);
             }
         }
     }
@@ -509,7 +551,7 @@ impl Context {
         match serde_json::to_value(&params) {
             Ok(value) => self.log_event("publish", Some(value)),
             Err(e) => {
-                eprintln!("ERROR: Failed to serialize publish params: {}", e);
+                error!("Failed to serialize publish params: {}", e);
                 return;
             }
         }
@@ -693,7 +735,7 @@ impl Context {
             match serde_json::to_value(&exposure) {
                 Ok(value) => self.log_event("exposure", Some(value)),
                 Err(e) => {
-                    eprintln!("ERROR: Failed to serialize exposure for experiment '{}': {}", experiment_name, e);
+                    error!("Failed to serialize exposure for experiment '{}': {}", experiment_name, e);
                 }
             }
             self.exposures.push(exposure);
@@ -759,7 +801,7 @@ fn now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or_else(|e| {
-            eprintln!("WARNING: System time error, returning 0: {}", e);
+            warn!("System time error, returning 0: {}", e);
             0
         })
 }

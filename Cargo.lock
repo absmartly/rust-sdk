@@ -7,6 +7,7 @@ name = "absmartly-sdk"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "log",
  "md-5",
  "regex",
  "reqwest",

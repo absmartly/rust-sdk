@@ -1,3 +1,4 @@
+use log::error;
 use regex::RegexBuilder;
 use serde_json::Value;
 
@@ -95,7 +96,7 @@ pub fn match_op(evaluator: &Evaluator, args: &Value) -> Value {
             {
                 Ok(regex) => Value::Bool(regex.is_match(&text_str)),
                 Err(e) => {
-                    eprintln!("ERROR: Invalid regex pattern '{}': {}", pattern_str, e);
+                    error!("Invalid regex pattern '{}': {}", pattern_str, e);
                     Value::Null
                 }
             }

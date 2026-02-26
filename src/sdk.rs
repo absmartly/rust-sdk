@@ -1,5 +1,6 @@
 use crate::context::Context;
 use crate::models::{ContextData, ContextOptions, PublishParams};
+use log::warn;
 use reqwest::Client;
 
 #[derive(Debug, Clone)]
@@ -267,12 +268,15 @@ impl ABsmartly {
         &self,
         units: Vec<(String, String)>,
         data: ContextData,
-        _options: Option<ContextOptions>,
+        options: Option<ContextOptions>,
     ) -> Context {
-        let mut context = Context::new(data);
+        let mut context = match options {
+            Some(opts) => Context::new_with_options(data, opts),
+            None => Context::new(data),
+        };
         for (unit_type, uid) in units {
             if let Err(e) = context.set_unit(&unit_type, &uid) {
-                eprintln!("WARNING: Failed to set unit '{}': {}", unit_type, e);
+                warn!("Failed to set unit '{}': {}", unit_type, e);
             }
         }
         context

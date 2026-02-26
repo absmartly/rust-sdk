@@ -158,8 +158,9 @@ pub struct ContextParams {
     pub units: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 pub struct ContextOptions {
     pub publish_delay: i64,
     pub refresh_period: i64,
+    pub event_logger: Option<Box<dyn Fn(&crate::context::Context, &str, Option<serde_json::Value>) + Send + Sync>>,
 }

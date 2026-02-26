@@ -23,6 +23,7 @@ base64 = "0.22"
 reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1.0", features = ["rt-multi-thread"] }
 urlencoding = "2.1"
+log = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full", "test-util"] }
