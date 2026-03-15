@@ -191,6 +191,14 @@ impl Context {
         self.state == ContextState::Finalizing
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.is_finalized()
+    }
+
+    pub fn is_closing(&self) -> bool {
+        self.is_finalizing()
+    }
+
     pub fn pending(&self) -> usize {
         self.pending
     }
@@ -204,7 +212,7 @@ impl Context {
             return Err("ABsmartly Context is finalized.".to_string());
         }
         if self.is_finalizing() {
-            return Err("ABsmartly Context is finalizing.".to_string());
+            return Err("ABsmartly Context is finalized.".to_string());
         }
 
         let uid = uid.trim();
@@ -247,7 +255,7 @@ impl Context {
             return Err("ABsmartly Context is finalized.".to_string());
         }
         if self.is_finalizing() {
-            return Err("ABsmartly Context is finalizing.".to_string());
+            return Err("ABsmartly Context is finalized.".to_string());
         }
 
         self.attrs.push(Attribute {
@@ -269,7 +277,7 @@ impl Context {
             return Err("ABsmartly Context is finalized.".to_string());
         }
         if self.is_finalizing() {
-            return Err("ABsmartly Context is finalizing.".to_string());
+            return Err("ABsmartly Context is finalized.".to_string());
         }
 
         let set_at = now_millis();
@@ -321,7 +329,7 @@ impl Context {
             return Err("ABsmartly Context is finalized.".to_string());
         }
         if self.is_finalizing() {
-            return Err("ABsmartly Context is finalizing.".to_string());
+            return Err("ABsmartly Context is finalized.".to_string());
         }
         self.cassignments
             .insert(experiment_name.to_string(), variant);
@@ -362,7 +370,7 @@ impl Context {
             return Err("ABsmartly Context is finalized.".to_string());
         }
         if self.is_finalizing() {
-            return Err("ABsmartly Context is finalizing.".to_string());
+            return Err("ABsmartly Context is finalized.".to_string());
         }
 
         let properties_map: Option<HashMap<String, Value>> = match properties.into() {
@@ -563,6 +571,10 @@ impl Context {
 
         self.state = ContextState::Finalized;
         self.log_event("finalize", None);
+    }
+
+    pub fn close(&mut self) {
+        self.finalize()
     }
 
     fn assign(&mut self, experiment_name: &str) -> Assignment {
@@ -2400,5 +2412,63 @@ mod tests {
 
         let result = ctx.set_override("exp_test", 2);
         assert!(result.is_ok(), "set_override should succeed after finalize");
+    }
+
+    #[test]
+    fn test_close_is_alias_for_finalize() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+
+        assert!(!ctx.is_closed());
+        ctx.close();
+        assert!(ctx.is_closed());
+        assert!(ctx.is_finalized());
+    }
+
+    #[test]
+    fn test_is_closed_matches_is_finalized() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+
+        assert_eq!(ctx.is_closed(), ctx.is_finalized());
+        ctx.finalize();
+        assert_eq!(ctx.is_closed(), ctx.is_finalized());
+    }
+
+    #[test]
+    fn test_is_closing_matches_is_finalizing() {
+        let data = make_context_data(vec![]);
+        let ctx = Context::new(data);
+
+        assert_eq!(ctx.is_closing(), ctx.is_finalizing());
+    }
+
+    #[test]
+    fn test_finalized_error_message() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+
+        ctx.finalize();
+        let result = ctx.set_unit("session_id", "uid");
+        assert_eq!(result.unwrap_err(), "ABsmartly Context is finalized.");
+    }
+
+    #[test]
+    fn test_unit_uid_blank_error_message() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+
+        let result = ctx.set_unit("session_id", "");
+        assert_eq!(result.unwrap_err(), "Unit 'session_id' UID must not be blank.");
+    }
+
+    #[test]
+    fn test_unit_uid_already_set_error_message() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+
+        ctx.set_unit("session_id", "uid1").unwrap();
+        let result = ctx.set_unit("session_id", "uid2");
+        assert_eq!(result.unwrap_err(), "Unit 'session_id' UID already set.");
     }
 }
