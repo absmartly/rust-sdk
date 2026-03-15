@@ -27,6 +27,7 @@ pub struct Context {
     overrides: HashMap<String, i32>,
     cassignments: HashMap<String, i32>,
     state: ContextState,
+    failed_error: Option<String>,
     pending: usize,
     attrs_seq: u64,
     index: HashMap<String, Experiment>,
@@ -52,6 +53,7 @@ impl Context {
             overrides: HashMap::new(),
             cassignments: HashMap::new(),
             state: ContextState::Loading,
+            failed_error: None,
             pending: 0,
             attrs_seq: 0,
             index: HashMap::new(),
@@ -98,6 +100,17 @@ impl Context {
         if self.state == ContextState::Loading {
             self.state = ContextState::Failed;
         }
+    }
+
+    pub fn become_failed_with_error(&mut self, error: String) {
+        if self.state == ContextState::Loading {
+            self.state = ContextState::Failed;
+            self.failed_error = Some(error);
+        }
+    }
+
+    pub fn ready_error(&self) -> Option<&String> {
+        self.failed_error.as_ref()
     }
 
     pub fn set_event_logger(&mut self, logger: EventLogger) {
@@ -825,6 +838,29 @@ mod tests {
         assert!(context.is_ready());
         assert!(!context.is_failed());
         assert!(!context.is_finalized());
+    }
+
+    #[test]
+    fn test_ready_error_is_none_when_ready() {
+        let data = make_context_data(vec![]);
+        let context = Context::new(data);
+        assert!(context.ready_error().is_none());
+    }
+
+    #[test]
+    fn test_ready_error_is_none_after_become_failed_without_error() {
+        let mut context = Context::new_loading();
+        context.become_failed();
+        assert!(context.is_failed());
+        assert!(context.ready_error().is_none());
+    }
+
+    #[test]
+    fn test_ready_error_returns_error_after_become_failed_with_error() {
+        let mut context = Context::new_loading();
+        context.become_failed_with_error("data fetch failed".to_string());
+        assert!(context.is_failed());
+        assert_eq!(context.ready_error(), Some(&"data fetch failed".to_string()));
     }
 
     #[test]
