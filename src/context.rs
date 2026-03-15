@@ -1154,7 +1154,8 @@ mod tests {
 
         let exp2 = make_experiment("exp2", vec!["{}"], vec![1.0]);
         let data2 = make_context_data(vec![exp2]);
-        context.refresh_with(data2);
+        context.set_data_fetcher(Box::new(move || Ok(data2.clone())));
+        context.refresh().unwrap();
 
         let experiments = context.experiments();
         assert!(experiments.contains(&"exp2".to_string()));
@@ -1371,7 +1372,8 @@ mod tests {
 
         let exp2 = make_experiment("exp2", vec!["{}"], vec![1.0]);
         let data2 = make_context_data(vec![exp2]);
-        ctx.refresh_with(data2);
+        ctx.set_data_fetcher(Box::new(move || Ok(data2.clone())));
+        ctx.refresh().unwrap();
 
         let entries = log.lock().unwrap();
         assert!(entries.iter().any(|e| e.event == "refresh"));
@@ -1859,7 +1861,8 @@ mod tests {
         assert_eq!(ctx.treatment("test_exp"), 1);
 
         let data2 = make_context_data(vec![exp]);
-        ctx.refresh_with(data2);
+        ctx.set_data_fetcher(Box::new(move || Ok(data2.clone())));
+        ctx.refresh().unwrap();
         assert_eq!(ctx.treatment("test_exp"), 1);
     }
 
@@ -1874,7 +1877,8 @@ mod tests {
         assert_eq!(ctx.treatment("test_exp"), 1);
 
         let data2 = make_context_data(vec![exp]);
-        ctx.refresh_with(data2);
+        ctx.set_data_fetcher(Box::new(move || Ok(data2.clone())));
+        ctx.refresh().unwrap();
         assert_eq!(ctx.treatment("test_exp"), 1);
     }
 
@@ -1890,7 +1894,8 @@ mod tests {
         let mut exp2 = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
         exp2.full_on_variant = 1;
         let data2 = make_context_data(vec![exp2]);
-        ctx.refresh_with(data2);
+        ctx.set_data_fetcher(Box::new(move || Ok(data2.clone())));
+        ctx.refresh().unwrap();
 
         assert_eq!(ctx.treatment("test_exp"), 1);
     }
@@ -1907,7 +1912,8 @@ mod tests {
         let mut exp2 = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
         exp2.traffic_split = vec![0.0, 1.0];
         let data2 = make_context_data(vec![exp2]);
-        ctx.refresh_with(data2);
+        ctx.set_data_fetcher(Box::new(move || Ok(data2.clone())));
+        ctx.refresh().unwrap();
 
         let _variant = ctx.treatment("test_exp");
         assert!(ctx.pending() > 0);
@@ -1926,7 +1932,8 @@ mod tests {
         let mut exp2 = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
         exp2.iteration = 2;
         let data2 = make_context_data(vec![exp2]);
-        ctx.refresh_with(data2);
+        ctx.set_data_fetcher(Box::new(move || Ok(data2.clone())));
+        ctx.refresh().unwrap();
 
         ctx.treatment("test_exp");
         assert!(ctx.pending() > pending_before);
@@ -1944,7 +1951,8 @@ mod tests {
 
         let exp2 = make_experiment_with_id("test_exp", 2, vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
         let data2 = make_context_data(vec![exp2]);
-        ctx.refresh_with(data2);
+        ctx.set_data_fetcher(Box::new(move || Ok(data2.clone())));
+        ctx.refresh().unwrap();
 
         ctx.treatment("test_exp");
         assert!(ctx.pending() > pending_before);
@@ -1961,7 +1969,8 @@ mod tests {
         assert_eq!(ctx.pending(), 1);
 
         let data2 = make_context_data(vec![exp]);
-        ctx.refresh_with(data2);
+        ctx.set_data_fetcher(Box::new(move || Ok(data2.clone())));
+        ctx.refresh().unwrap();
 
         let variant2 = ctx.treatment("test_exp");
         assert_eq!(variant1, variant2);
