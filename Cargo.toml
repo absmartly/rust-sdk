@@ -12,7 +12,7 @@ readme = "README.md"
 keywords = ["absmartly", "ab-testing", "feature-flags", "experimentation", "sdk"]
 categories = ["development-tools", "web-programming"]
 exclude = [".github/", "target/", ".claude/"]
-rust-version = "1.83"
+rust-version = "1.85"
 
 [lints.rust]
 unsafe_code = "forbid"
