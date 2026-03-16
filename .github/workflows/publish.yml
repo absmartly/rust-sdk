@@ -13,27 +13,23 @@ jobs:
     name: Test before publish
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
-        with:
-          toolchain: stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --locked --verbose
 
   publish:
     name: Publish to crates.io
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
-        with:
-          toolchain: stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Verify version matches tag
         run: |
