@@ -1,2 +1,2 @@
-msrv = "1.70"
+msrv = "1.83"
 doc-valid-idents = ["ABsmartly", "GitHub", "JavaScript", "TypeScript"]
