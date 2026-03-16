@@ -14,7 +14,7 @@ fn fmix32(mut h: u32) -> u32 {
 }
 
 fn rotl32(a: u32, b: u32) -> u32 {
-    (a << b) | (a >> (32 - b))
+    a.rotate_left(b)
 }
 
 fn scramble32(block: u32) -> u32 {

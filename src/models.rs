@@ -214,9 +214,10 @@ pub struct PublishParams {
 }
 
 /// The lifecycle state of a context.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ContextState {
     /// Context is loading data.
+    #[default]
     Loading,
     /// Context is ready for use.
     Ready,
@@ -226,12 +227,6 @@ pub enum ContextState {
     Finalizing,
     /// Context has been finalized and is no longer usable.
     Finalized,
-}
-
-impl Default for ContextState {
-    fn default() -> Self {
-        Self::Loading
-    }
 }
 
 /// Parameters for creating a new context.
