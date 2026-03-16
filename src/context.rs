@@ -525,8 +525,27 @@ impl Context {
     }
 
     pub fn refresh_with(&mut self, new_data: ContextData) {
-        self.assignments.clear();
         self.init(new_data);
+        let to_remove: Vec<String> = {
+            let assignments = &self.assignments;
+            let index = &self.index;
+            assignments
+                .iter()
+                .filter_map(|(name, assignment)| {
+                    if assignment.overridden {
+                        return None;
+                    }
+                    let should_remove = match index.get(name) {
+                        None => assignment.assigned,
+                        Some(exp) => !Self::experiment_matches(&exp.data, assignment),
+                    };
+                    if should_remove { Some(name.clone()) } else { None }
+                })
+                .collect()
+        };
+        for name in to_remove {
+            self.assignments.remove(&name);
+        }
         match serde_json::to_value(&self.data) {
             Ok(value) => self.log_event("refresh", Some(value)),
             Err(e) => {
@@ -593,7 +612,7 @@ impl Context {
                 }
             } else if !has_custom || self.cassignments[experiment_name] == cached.variant {
                 if let Some(exp) = self.index.get(experiment_name) {
-                    if self.experiment_matches(&exp.data, cached)
+                    if Self::experiment_matches(&exp.data, cached)
                         && self.audience_matches(&exp.data, cached)
                     {
                         return cached.clone();
@@ -691,7 +710,7 @@ impl Context {
         assignment
     }
 
-    fn experiment_matches(&self, experiment: &ExperimentData, assignment: &Assignment) -> bool {
+    fn experiment_matches(experiment: &ExperimentData, assignment: &Assignment) -> bool {
         experiment.id == assignment.id
             && experiment.unit_type == assignment.unit_type
             && experiment.iteration == assignment.iteration
