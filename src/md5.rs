@@ -1,5 +1,8 @@
+//! MD5 hashing utility used internally for unit hashing.
+
 use md5::{Digest, Md5};
 
+/// Computes the MD5 digest of the given byte slice, returning a 16-byte array.
 pub fn md5(data: &[u8]) -> [u8; 16] {
     let mut hasher = Md5::new();
     hasher.update(data);

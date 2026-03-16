@@ -1,46 +1,53 @@
+//! Core expression evaluator with type coercion and comparison logic.
+
 use serde_json::Value;
 use std::collections::HashMap;
 
 use super::operators;
 
+/// Evaluates JSON expressions against a set of variables.
+#[derive(Debug)]
 pub struct Evaluator {
     vars: HashMap<String, Value>,
 }
 
 impl Evaluator {
+    /// Creates a new evaluator with the given variable bindings.
     pub fn new(vars: HashMap<String, Value>) -> Self {
         Self { vars }
     }
 
+    /// Evaluates a JSON expression, dispatching to the appropriate operator.
     pub fn evaluate(&self, expr: &Value) -> Value {
         match expr {
             Value::Array(arr) => operators::and_op(self, &Value::Array(arr.clone())),
             Value::Object(map) => {
-                for (key, value) in map.iter() {
+                if let Some((key, value)) = map.into_iter().next() {
                     match key.as_str() {
-                        "and" => return operators::and_op(self, value),
-                        "or" => return operators::or_op(self, value),
-                        "value" => return operators::value_op(self, value),
-                        "var" => return operators::var_op(self, value),
-                        "null" => return operators::null_op(self, value),
-                        "not" => return operators::not_op(self, value),
-                        "in" => return operators::in_op(self, value),
-                        "match" => return operators::match_op(self, value),
-                        "eq" => return operators::eq_op(self, value),
-                        "gt" => return operators::gt_op(self, value),
-                        "gte" => return operators::gte_op(self, value),
-                        "lt" => return operators::lt_op(self, value),
-                        "lte" => return operators::lte_op(self, value),
-                        _ => {}
+                        "and" => operators::and_op(self, value),
+                        "or" => operators::or_op(self, value),
+                        "value" => operators::value_op(self, value),
+                        "var" => operators::var_op(self, value),
+                        "null" => operators::null_op(self, value),
+                        "not" => operators::not_op(self, value),
+                        "in" => operators::in_op(self, value),
+                        "match" => operators::match_op(self, value),
+                        "eq" => operators::eq_op(self, value),
+                        "gt" => operators::gt_op(self, value),
+                        "gte" => operators::gte_op(self, value),
+                        "lt" => operators::lt_op(self, value),
+                        "lte" => operators::lte_op(self, value),
+                        _ => Value::Null,
                     }
-                    break;
+                } else {
+                    Value::Null
                 }
-                Value::Null
             }
             _ => Value::Null,
         }
     }
 
+    /// Converts a JSON value to a boolean using ABsmartly's coercion rules.
     pub fn boolean_convert(&self, x: &Value) -> bool {
         match x {
             Value::Bool(b) => *b,
@@ -55,11 +62,11 @@ impl Evaluator {
             }
             Value::String(s) => s != "false" && s != "0" && !s.is_empty(),
             Value::Null => false,
-            Value::Array(_) => true,
-            Value::Object(_) => true,
+            Value::Array(_) | Value::Object(_) => true,
         }
     }
 
+    /// Converts a JSON value to a number, returning `None` if conversion is not possible.
     pub fn number_convert(&self, x: &Value) -> Option<f64> {
         match x {
             Value::Number(n) => n.as_f64(),
@@ -69,15 +76,16 @@ impl Evaluator {
         }
     }
 
+    /// Converts a JSON value to a string, returning `None` if conversion is not possible.
     pub fn string_convert(&self, x: &Value) -> Option<String> {
         match x {
             Value::String(s) => Some(s.clone()),
             Value::Bool(b) => Some(b.to_string()),
             Value::Number(n) => {
                 if let Some(f) = n.as_f64() {
-                    let formatted = format!("{:.15}", f);
+                    let formatted = format!("{f:.15}");
                     let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
-                    Some(trimmed.to_string())
+                    Some(trimmed.to_owned())
                 } else {
                     None
                 }
@@ -86,6 +94,7 @@ impl Evaluator {
         }
     }
 
+    /// Extracts a variable value from the evaluator's variable map using a slash-separated path.
     pub fn extract_var(&self, path: &str) -> Value {
         let frags: Vec<&str> = path.split('/').collect();
         let mut target: &Value = &Value::Object(
@@ -122,6 +131,7 @@ impl Evaluator {
         target.clone()
     }
 
+    /// Compares two JSON values, returning -1, 0, or 1 for ordering, or `None` if incomparable.
     pub fn compare(&self, lhs: &Value, rhs: &Value) -> Option<i32> {
         if lhs.is_null() {
             return if rhs.is_null() { Some(0) } else { None };
@@ -170,12 +180,13 @@ impl Evaluator {
     }
 }
 
+/// Performs a deep equality comparison of two JSON values.
 pub fn values_equal_deep(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Null, Value::Null) => true,
         (Value::Bool(ab), Value::Bool(bb)) => ab == bb,
         (Value::Number(an), Value::Number(bn)) => {
-            an.as_f64().zip(bn.as_f64()).map_or(false, |(a, b)| {
+            an.as_f64().zip(bn.as_f64()).is_some_and(|(a, b)| {
                 if a.is_nan() && b.is_nan() {
                     true
                 } else {
@@ -183,13 +194,19 @@ pub fn values_equal_deep(a: &Value, b: &Value) -> bool {
                 }
             })
         }
-        (Value::String(as_), Value::String(bs)) => as_ == bs,
+        (Value::String(a_str), Value::String(b_str)) => a_str == b_str,
         (Value::Array(aa), Value::Array(ba)) => {
-            aa.len() == ba.len() && aa.iter().zip(ba.iter()).all(|(x, y)| values_equal_deep(x, y))
+            aa.len() == ba.len()
+                && aa
+                    .iter()
+                    .zip(ba.iter())
+                    .all(|(x, y)| values_equal_deep(x, y))
         }
         (Value::Object(ao), Value::Object(bo)) => {
             ao.len() == bo.len()
-                && ao.iter().all(|(k, v)| bo.get(k).map_or(false, |bv| values_equal_deep(v, bv)))
+                && ao
+                    .iter()
+                    .all(|(k, v)| bo.get(k).is_some_and(|bv| values_equal_deep(v, bv)))
         }
         _ => false,
     }
@@ -265,8 +282,14 @@ mod tests {
         assert_eq!(evaluator.number_convert(&json!(1.5)), Some(1.5));
         assert_eq!(evaluator.number_convert(&json!(2.0)), Some(2.0));
         assert_eq!(evaluator.number_convert(&json!(3.0)), Some(3.0));
-        assert_eq!(evaluator.number_convert(&json!(2147483647)), Some(2147483647.0));
-        assert_eq!(evaluator.number_convert(&json!(-2147483647)), Some(-2147483647.0));
+        assert_eq!(
+            evaluator.number_convert(&json!(2_147_483_647)),
+            Some(2_147_483_647.0)
+        );
+        assert_eq!(
+            evaluator.number_convert(&json!(-2_147_483_647)),
+            Some(-2_147_483_647.0)
+        );
     }
 
     #[test]
@@ -291,27 +314,45 @@ mod tests {
     #[test]
     fn test_string_convert_booleans() {
         let evaluator = make_evaluator();
-        assert_eq!(evaluator.string_convert(&json!(true)), Some("true".to_string()));
-        assert_eq!(evaluator.string_convert(&json!(false)), Some("false".to_string()));
+        assert_eq!(
+            evaluator.string_convert(&json!(true)),
+            Some("true".to_string())
+        );
+        assert_eq!(
+            evaluator.string_convert(&json!(false)),
+            Some("false".to_string())
+        );
     }
 
     #[test]
     fn test_string_convert_strings() {
         let evaluator = make_evaluator();
-        assert_eq!(evaluator.string_convert(&json!("")), Some("".to_string()));
-        assert_eq!(evaluator.string_convert(&json!("abc")), Some("abc".to_string()));
+        assert_eq!(evaluator.string_convert(&json!("")), Some(String::new()));
+        assert_eq!(
+            evaluator.string_convert(&json!("abc")),
+            Some("abc".to_string())
+        );
     }
 
     #[test]
     fn test_string_convert_numbers() {
         let evaluator = make_evaluator();
-        assert_eq!(evaluator.string_convert(&json!(-1.0)), Some("-1".to_string()));
+        assert_eq!(
+            evaluator.string_convert(&json!(-1.0)),
+            Some("-1".to_string())
+        );
         assert_eq!(evaluator.string_convert(&json!(0.0)), Some("0".to_string()));
         assert_eq!(evaluator.string_convert(&json!(1.0)), Some("1".to_string()));
         assert_eq!(evaluator.string_convert(&json!(2.0)), Some("2".to_string()));
         assert_eq!(evaluator.string_convert(&json!(3.0)), Some("3".to_string()));
-        assert_eq!(evaluator.string_convert(&json!(2147483647.0)), Some("2147483647".to_string()));
-        assert_eq!(evaluator.string_convert(&json!(-2147483647.0)), Some("-2147483647".to_string()));
+        assert_eq!(
+            evaluator.string_convert(&json!(2_147_483_647.0)),
+            Some("2147483647".to_string())
+        );
+        assert_eq!(
+            evaluator.string_convert(&json!(-2_147_483_647.0)),
+            Some("-2147483647".to_string())
+        );
     }
 
     #[test]
@@ -395,7 +436,10 @@ mod tests {
     fn test_compare_objects() {
         let evaluator = make_evaluator();
         assert_eq!(evaluator.compare(&json!({}), &json!({})), Some(0));
-        assert_eq!(evaluator.compare(&json!({"a": 1}), &json!({"a": 1})), Some(0));
+        assert_eq!(
+            evaluator.compare(&json!({"a": 1}), &json!({"a": 1})),
+            Some(0)
+        );
         assert_eq!(evaluator.compare(&json!({"a": 1}), &json!({"b": 2})), None);
         assert_eq!(evaluator.compare(&json!({}), &json!([])), None);
     }
@@ -501,8 +545,14 @@ mod tests {
 
     #[test]
     fn test_values_equal_deep_objects() {
-        assert!(values_equal_deep(&json!({"a": 1, "b": 2}), &json!({"a": 1, "b": 2})));
-        assert!(values_equal_deep(&json!({"a": 1, "b": 2}), &json!({"b": 2, "a": 1})));
+        assert!(values_equal_deep(
+            &json!({"a": 1, "b": 2}),
+            &json!({"a": 1, "b": 2})
+        ));
+        assert!(values_equal_deep(
+            &json!({"a": 1, "b": 2}),
+            &json!({"b": 2, "a": 1})
+        ));
         assert!(!values_equal_deep(&json!({"a": 1}), &json!({"b": 2})));
         assert!(!values_equal_deep(&json!({}), &json!({"a": 1})));
         assert!(!values_equal_deep(&json!({"a": 1}), &json!({})));
