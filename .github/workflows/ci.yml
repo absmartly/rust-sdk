@@ -32,7 +32,7 @@ jobs:
           key: ${{ matrix.rust }}
 
       - name: Run tests
-        run: cargo test --locked --verbose
+        run: cargo test --verbose
 
   lint:
     name: Lint
