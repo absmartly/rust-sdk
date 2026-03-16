@@ -1,12 +1,14 @@
-const C1: u32 = 0xcc9e2d51;
-const C2: u32 = 0x1b873593;
-const C3: u32 = 0xe6546b64;
+//! `MurmurHash3` (32-bit) implementation used for deterministic unit assignment.
+
+const C1: u32 = 0xcc9e_2d51;
+const C2: u32 = 0x1b87_3593;
+const C3: u32 = 0xe654_6b64;
 
 fn fmix32(mut h: u32) -> u32 {
     h ^= h >> 16;
-    h = h.wrapping_mul(0x85ebca6b);
+    h = h.wrapping_mul(0x85eb_ca6b);
     h ^= h >> 13;
-    h = h.wrapping_mul(0xc2b2ae35);
+    h = h.wrapping_mul(0xc2b2_ae35);
     h ^= h >> 16;
     h
 }
@@ -19,6 +21,7 @@ fn scramble32(block: u32) -> u32 {
     rotl32(block.wrapping_mul(C1), 15).wrapping_mul(C2)
 }
 
+/// Computes a 32-bit `MurmurHash3` of the given byte slice with the specified seed.
 pub fn murmur3_32(key: &[u8], seed: u32) -> u32 {
     let mut hash = seed;
 
@@ -36,24 +39,26 @@ pub fn murmur3_32(key: &[u8], seed: u32) -> u32 {
     let mut remaining: u32 = 0;
     match key.len() & 3 {
         3 => {
-            remaining ^= (key[i + 2] as u32) << 16;
-            remaining ^= (key[i + 1] as u32) << 8;
-            remaining ^= key[i] as u32;
+            remaining ^= u32::from(key[i + 2]) << 16;
+            remaining ^= u32::from(key[i + 1]) << 8;
+            remaining ^= u32::from(key[i]);
             hash ^= scramble32(remaining);
         }
         2 => {
-            remaining ^= (key[i + 1] as u32) << 8;
-            remaining ^= key[i] as u32;
+            remaining ^= u32::from(key[i + 1]) << 8;
+            remaining ^= u32::from(key[i]);
             hash ^= scramble32(remaining);
         }
         1 => {
-            remaining ^= key[i] as u32;
+            remaining ^= u32::from(key[i]);
             hash ^= scramble32(remaining);
         }
         _ => {}
     }
 
-    hash ^= key.len() as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let len = key.len() as u32;
+    hash ^= len;
     fmix32(hash)
 }
 
@@ -63,49 +68,49 @@ mod tests {
 
     #[test]
     fn test_empty_string() {
-        assert_eq!(murmur3_32(b"", 0), 0x00000000);
+        assert_eq!(murmur3_32(b"", 0), 0x0000_0000);
     }
 
     #[test]
     fn test_space() {
-        assert_eq!(murmur3_32(b" ", 0), 0x7ef49b98);
+        assert_eq!(murmur3_32(b" ", 0), 0x7ef4_9b98);
     }
 
     #[test]
     fn test_single_char() {
-        assert_eq!(murmur3_32(b"t", 0), 0xca87df4d);
+        assert_eq!(murmur3_32(b"t", 0), 0xca87_df4d);
     }
 
     #[test]
     fn test_two_chars() {
-        assert_eq!(murmur3_32(b"te", 0), 0xedb8ee1b);
+        assert_eq!(murmur3_32(b"te", 0), 0xedb8_ee1b);
     }
 
     #[test]
     fn test_three_chars() {
-        assert_eq!(murmur3_32(b"tes", 0), 0x0bb90e5a);
+        assert_eq!(murmur3_32(b"tes", 0), 0x0bb9_0e5a);
     }
 
     #[test]
     fn test_four_chars() {
-        assert_eq!(murmur3_32(b"test", 0), 0xba6bd213);
+        assert_eq!(murmur3_32(b"test", 0), 0xba6b_d213);
     }
 
     #[test]
     fn test_with_seed_deadbeef() {
-        assert_eq!(murmur3_32(b"test", 0xdeadbeef), 0xaa22d41a);
+        assert_eq!(murmur3_32(b"test", 0xdead_beef), 0xaa22_d41a);
     }
 
     #[test]
     fn test_with_seed_1() {
-        assert_eq!(murmur3_32(b"test", 1), 0x99c02ae2);
+        assert_eq!(murmur3_32(b"test", 1), 0x99c0_2ae2);
     }
 
     #[test]
     fn test_long_string() {
         assert_eq!(
             murmur3_32(b"The quick brown fox jumps over the lazy dog", 0),
-            0x2e4ff723
+            0x2e4f_f723
         );
     }
 }

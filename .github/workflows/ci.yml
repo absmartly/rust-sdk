@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
-    branches: [main, master]
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,29 +17,19 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: [stable, 1.70.0]
+        rust: [stable, "1.70.0"]
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.rust }}-
-
-      - name: Build
-        run: cargo build --verbose
+          key: ${{ matrix.rust }}
 
       - name: Run tests
         run: cargo test --verbose
@@ -51,10 +41,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
           components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -69,11 +60,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
-        with:
-          toolchain: stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Check documentation
         run: cargo doc --no-deps --document-private-items
         env:
-          RUSTDOCFLAGS: -D warnings
+          RUSTDOCFLAGS: "-Dwarnings"

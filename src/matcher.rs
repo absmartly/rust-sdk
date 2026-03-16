@@ -1,19 +1,28 @@
+//! Audience matching using JSON-based filter expressions.
+
 use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::jsonexpr::JsonExpr;
 
+/// Evaluates audience filter expressions against a set of attribute variables.
+#[derive(Debug)]
 pub struct AudienceMatcher {
     json_expr: JsonExpr,
 }
 
 impl AudienceMatcher {
+    /// Creates a new audience matcher.
     pub fn new() -> Self {
         Self {
             json_expr: JsonExpr::new(),
         }
     }
 
+    /// Evaluates an audience JSON string against the provided variables.
+    ///
+    /// Returns `Some(true)` if the audience matches, `Some(false)` if it doesn't,
+    /// or `None` if the audience string is invalid or has no filter.
     pub fn evaluate(&self, audience_string: &str, vars: &HashMap<String, Value>) -> Option<bool> {
         match serde_json::from_str::<Value>(audience_string) {
             Ok(audience) => {
@@ -66,11 +75,26 @@ mod tests {
         let matcher = AudienceMatcher::new();
         let vars = HashMap::new();
 
-        assert_eq!(matcher.evaluate(r#"{"filter":[{"value":5}]}"#, &vars), Some(true));
-        assert_eq!(matcher.evaluate(r#"{"filter":[{"value":true}]}"#, &vars), Some(true));
-        assert_eq!(matcher.evaluate(r#"{"filter":[{"value":1}]}"#, &vars), Some(true));
-        assert_eq!(matcher.evaluate(r#"{"filter":[{"value":null}]}"#, &vars), Some(false));
-        assert_eq!(matcher.evaluate(r#"{"filter":[{"value":0}]}"#, &vars), Some(false));
+        assert_eq!(
+            matcher.evaluate(r#"{"filter":[{"value":5}]}"#, &vars),
+            Some(true)
+        );
+        assert_eq!(
+            matcher.evaluate(r#"{"filter":[{"value":true}]}"#, &vars),
+            Some(true)
+        );
+        assert_eq!(
+            matcher.evaluate(r#"{"filter":[{"value":1}]}"#, &vars),
+            Some(true)
+        );
+        assert_eq!(
+            matcher.evaluate(r#"{"filter":[{"value":null}]}"#, &vars),
+            Some(false)
+        );
+        assert_eq!(
+            matcher.evaluate(r#"{"filter":[{"value":0}]}"#, &vars),
+            Some(false)
+        );
     }
 
     #[test]

@@ -1,16 +1,21 @@
+//! Utility functions for hashing, encoding, and variant selection.
+
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
 use crate::md5::md5;
 
+/// Encodes the given bytes as a URL-safe base64 string without padding.
 pub fn base64_url_no_padding(data: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(data)
 }
 
+/// Hashes a unit value using MD5 and returns the result as a URL-safe base64 string.
 pub fn hash_unit(value: &str) -> String {
     let hash = md5(value.as_bytes());
     base64_url_no_padding(&hash)
 }
 
+/// Selects a variant index from a probability split based on the given probability value.
 pub fn choose_variant(split: &[f64], prob: f64) -> usize {
     let mut cum_sum = 0.0;
     for (i, &weight) in split.iter().enumerate() {
@@ -22,8 +27,9 @@ pub fn choose_variant(split: &[f64], prob: f64) -> usize {
     split.len().saturating_sub(1)
 }
 
+/// Compares two slices for element-wise equality.
 pub fn array_equals_shallow<T: PartialEq>(a: &[T], b: &[T]) -> bool {
-    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
+    a == b
 }
 
 #[cfg(test)]
@@ -51,7 +57,10 @@ mod tests {
     #[test]
     fn test_base64_url_no_padding_special_chars() {
         let special = "special characters açb↓c".as_bytes();
-        assert_eq!(base64_url_no_padding(special), "c3BlY2lhbCBjaGFyYWN0ZXJzIGHDp2LihpNj");
+        assert_eq!(
+            base64_url_no_padding(special),
+            "c3BlY2lhbCBjaGFyYWN0ZXJzIGHDp2LihpNj"
+        );
     }
 
     #[test]

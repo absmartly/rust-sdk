@@ -1,12 +1,18 @@
+//! Experiment context for managing assignments, exposures, and goal tracking.
+
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::assigner::VariantAssigner;
 use crate::matcher::AudienceMatcher;
-use crate::models::*;
+use crate::models::{
+    Assignment, Attribute, ContextData, ContextState, ExperimentData, Exposure, Goal,
+    PublishParams, Unit,
+};
 use crate::utils::{array_equals_shallow, hash_unit};
 
+/// Callback type for logging context events.
 pub type EventLogger = Box<dyn Fn(&Context, &str, Option<Value>) + Send + Sync>;
 
 struct Experiment {
@@ -14,6 +20,23 @@ struct Experiment {
     variables: Vec<HashMap<String, Value>>,
 }
 
+impl std::fmt::Debug for Experiment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Experiment")
+            .field("data", &self.data)
+            .field("variables", &self.variables)
+            .finish()
+    }
+}
+
+/// The main context for interacting with ABsmartly experiments.
+///
+/// A context holds unit assignments, tracks exposures and goals, and resolves
+/// experiment variables. Create one via [`SDK::create_context`] or
+/// [`SDK::create_context_with`].
+///
+/// [`SDK::create_context`]: crate::sdk::SDK::create_context
+/// [`SDK::create_context_with`]: crate::sdk::SDK::create_context_with
 pub struct Context {
     units: HashMap<String, String>,
     attrs: Vec<Attribute>,
@@ -34,7 +57,19 @@ pub struct Context {
     event_logger: Option<EventLogger>,
 }
 
+impl std::fmt::Debug for Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Context")
+            .field("units", &self.units)
+            .field("state", &self.state)
+            .field("pending", &self.pending)
+            .field("data", &self.data)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Context {
+    /// Creates a new context initialized with the given experiment data.
     pub fn new(data: ContextData) -> Self {
         let mut ctx = Self {
             units: HashMap::new(),
@@ -60,6 +95,7 @@ impl Context {
         ctx
     }
 
+    /// Sets an event logger callback for observing context events.
     pub fn set_event_logger(&mut self, logger: EventLogger) {
         self.event_logger = Some(logger);
     }
@@ -95,7 +131,7 @@ impl Context {
                 variables.push(parsed);
             }
 
-            self.index.insert(
+            let _ = self.index.insert(
                 experiment.name.clone(),
                 Experiment {
                     data: experiment.clone(),
@@ -105,53 +141,75 @@ impl Context {
         }
     }
 
+    /// Returns true if the context is ready for use.
     pub fn is_ready(&self) -> bool {
         self.state == ContextState::Ready
     }
 
+    /// Returns true if the context failed to initialize.
     pub fn is_failed(&self) -> bool {
         self.state == ContextState::Failed
     }
 
+    /// Returns true if the context has been finalized.
     pub fn is_finalized(&self) -> bool {
         self.state == ContextState::Finalized
     }
 
+    /// Returns true if the context is currently finalizing.
     pub fn is_finalizing(&self) -> bool {
         self.state == ContextState::Finalizing
     }
 
+    /// Returns the number of pending events waiting to be published.
     pub fn pending(&self) -> usize {
         self.pending
     }
 
+    fn check_not_finalized(&self) -> Result<(), String> {
+        if self.is_finalized() {
+            return Err("ABSmartly Context is finalized.".to_owned());
+        }
+        if self.is_finalizing() {
+            return Err("ABSmartly Context is finalizing.".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Returns a reference to the context's experiment data.
     pub fn data(&self) -> &ContextData {
         &self.data
     }
 
+    /// Sets a unit identifier for the given unit type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the context is finalized/finalizing, the UID is blank,
+    /// or a different UID is already set for this unit type.
     pub fn set_unit(&mut self, unit_type: &str, uid: &str) -> Result<(), String> {
-        if self.is_finalized() {
-            return Err("ABSmartly Context is finalized.".to_string());
-        }
-        if self.is_finalizing() {
-            return Err("ABSmartly Context is finalizing.".to_string());
-        }
+        self.check_not_finalized()?;
 
         let uid = uid.trim();
         if uid.is_empty() {
-            return Err(format!("Unit '{}' UID must not be blank.", unit_type));
+            return Err(format!("Unit '{unit_type}' UID must not be blank."));
         }
 
         if let Some(existing) = self.units.get(unit_type) {
             if existing != uid {
-                return Err(format!("Unit '{}' UID already set.", unit_type));
+                return Err(format!("Unit '{unit_type}' UID already set."));
             }
         }
 
-        self.units.insert(unit_type.to_string(), uid.to_string());
+        let _ = self.units.insert(unit_type.to_owned(), uid.to_owned());
         Ok(())
     }
 
+    /// Sets multiple unit identifiers at once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any individual `set_unit` call fails.
     pub fn set_units<I, K, V>(&mut self, units: I) -> Result<(), String>
     where
         I: IntoIterator<Item = (K, V)>,
@@ -164,24 +222,26 @@ impl Context {
         Ok(())
     }
 
+    /// Returns the UID for the given unit type, if set.
     pub fn get_unit(&self, unit_type: &str) -> Option<&String> {
         self.units.get(unit_type)
     }
 
+    /// Returns all unit type to UID mappings.
     pub fn get_units(&self) -> &HashMap<String, String> {
         &self.units
     }
 
+    /// Sets a context attribute.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the context is finalized or finalizing.
     pub fn set_attribute(&mut self, name: &str, value: impl Into<Value>) -> Result<(), String> {
-        if self.is_finalized() {
-            return Err("ABSmartly Context is finalized.".to_string());
-        }
-        if self.is_finalizing() {
-            return Err("ABSmartly Context is finalizing.".to_string());
-        }
+        self.check_not_finalized()?;
 
         self.attrs.push(Attribute {
-            name: name.to_string(),
+            name: name.to_owned(),
             value: value.into(),
             set_at: now_millis(),
         });
@@ -189,18 +249,18 @@ impl Context {
         Ok(())
     }
 
+    /// Sets multiple context attributes at once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the context is finalized or finalizing.
     pub fn set_attributes<I, K, V>(&mut self, attrs: I) -> Result<(), String>
     where
         I: IntoIterator<Item = (K, V)>,
         K: Into<String>,
         V: Into<Value>,
     {
-        if self.is_finalized() {
-            return Err("ABSmartly Context is finalized.".to_string());
-        }
-        if self.is_finalizing() {
-            return Err("ABSmartly Context is finalizing.".to_string());
-        }
+        self.check_not_finalized()?;
 
         let set_at = now_millis();
         for (name, value) in attrs {
@@ -214,6 +274,7 @@ impl Context {
         Ok(())
     }
 
+    /// Returns the most recently set value for the given attribute name.
     pub fn get_attribute(&self, name: &str) -> Option<&Value> {
         self.attrs
             .iter()
@@ -222,40 +283,53 @@ impl Context {
             .map(|a| &a.value)
     }
 
+    /// Returns all attributes as a map (last-write-wins for duplicate names).
     pub fn get_attributes(&self) -> HashMap<String, Value> {
         let mut attrs = HashMap::new();
         for attr in &self.attrs {
-            attrs.insert(attr.name.clone(), attr.value.clone());
+            let _ = attrs.insert(attr.name.clone(), attr.value.clone());
         }
         attrs
     }
 
+    /// Sets an override for the given experiment, forcing a specific variant.
     pub fn set_override(&mut self, experiment_name: &str, variant: i32) {
-        self.overrides.insert(experiment_name.to_string(), variant);
+        let _ = self.overrides.insert(experiment_name.to_owned(), variant);
     }
 
+    /// Sets multiple experiment overrides at once.
     pub fn set_overrides<I, K>(&mut self, overrides: I)
     where
         I: IntoIterator<Item = (K, i32)>,
         K: Into<String>,
     {
         for (experiment_name, variant) in overrides {
-            self.overrides.insert(experiment_name.into(), variant);
+            let _ = self.overrides.insert(experiment_name.into(), variant);
         }
     }
 
-    pub fn set_custom_assignment(&mut self, experiment_name: &str, variant: i32) -> Result<(), String> {
-        if self.is_finalized() {
-            return Err("ABSmartly Context is finalized.".to_string());
-        }
-        if self.is_finalizing() {
-            return Err("ABSmartly Context is finalizing.".to_string());
-        }
-        self.cassignments
-            .insert(experiment_name.to_string(), variant);
+    /// Sets a custom assignment for the given experiment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the context is finalized or finalizing.
+    pub fn set_custom_assignment(
+        &mut self,
+        experiment_name: &str,
+        variant: i32,
+    ) -> Result<(), String> {
+        self.check_not_finalized()?;
+        let _ = self
+            .cassignments
+            .insert(experiment_name.to_owned(), variant);
         Ok(())
     }
 
+    /// Sets multiple custom assignments at once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any individual assignment fails.
     pub fn set_custom_assignments<I, K>(&mut self, assignments: I) -> Result<(), String>
     where
         I: IntoIterator<Item = (K, i32)>,
@@ -267,10 +341,12 @@ impl Context {
         Ok(())
     }
 
+    /// Returns the assigned variant for an experiment without recording an exposure.
     pub fn peek(&mut self, experiment_name: &str) -> i32 {
         self.assign(experiment_name).variant
     }
 
+    /// Returns the assigned variant for an experiment and records an exposure.
     pub fn treatment(&mut self, experiment_name: &str) -> i32 {
         let assignment = self.assign(experiment_name);
         let variant = assignment.variant;
@@ -285,33 +361,37 @@ impl Context {
         variant
     }
 
+    /// Records a goal achievement event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the context is finalized or finalizing.
     pub fn track(&mut self, goal_name: &str, properties: impl Into<Value>) -> Result<(), String> {
-        if self.is_finalized() {
-            return Err("ABSmartly Context is finalized.".to_string());
-        }
-        if self.is_finalizing() {
-            return Err("ABSmartly Context is finalizing.".to_string());
-        }
+        self.check_not_finalized()?;
 
         let properties_map: Option<HashMap<String, Value>> = match properties.into() {
             Value::Object(map) => Some(map.into_iter().collect()),
-            Value::Null => None,
             _ => None,
         };
 
         let goal = Goal {
-            name: goal_name.to_string(),
+            name: goal_name.to_owned(),
             properties: properties_map,
             achieved_at: now_millis(),
         };
 
-        self.log_event("goal", Some(serde_json::to_value(&goal).unwrap_or_default()));
+        self.log_event(
+            "goal",
+            Some(serde_json::to_value(&goal).unwrap_or_default()),
+        );
         self.goals.push(goal);
         self.pending += 1;
 
         Ok(())
     }
 
+    /// Returns the variable value for the given key, falling back to the default.
+    /// Records an exposure for the experiment that provides the variable.
     pub fn variable_value(&mut self, key: &str, default_value: impl Into<Value>) -> Value {
         if let Some(experiment_names) = self.index_variables.get(key).cloned() {
             for exp_name in experiment_names {
@@ -335,6 +415,7 @@ impl Context {
         default_value.into()
     }
 
+    /// Returns the variable value for the given key without recording an exposure.
     pub fn peek_variable_value(&mut self, key: &str, default_value: impl Into<Value>) -> Value {
         if let Some(experiment_names) = self.index_variables.get(key).cloned() {
             for exp_name in experiment_names {
@@ -351,89 +432,100 @@ impl Context {
         default_value.into()
     }
 
+    /// Returns a map of variable keys to the experiment names that provide them.
     pub fn variable_keys(&self) -> HashMap<String, Vec<String>> {
-        let mut result = HashMap::new();
-        for (key, exp_names) in &self.index_variables {
-            result.insert(key.clone(), exp_names.clone());
-        }
-        result
+        self.index_variables.clone()
     }
 
+    /// Returns a custom field value for the given experiment and field name.
     pub fn custom_field_value(&self, experiment_name: &str, field_name: &str) -> Option<Value> {
-        if let Some(exp) = self.index.get(experiment_name) {
-            if let Some(ref custom_fields) = exp.data.custom_field_values {
-                if let Some(field) = custom_fields.iter().find(|f| f.name == field_name) {
-                    return match field.field_type.as_str() {
-                        "text" | "string" => Some(Value::String(field.value.clone())),
-                        "number" => field.value.parse::<f64>().ok().map(|n| {
-                            serde_json::Number::from_f64(n)
-                                .map(Value::Number)
-                                .unwrap_or(Value::Null)
-                        }),
-                        "json" => {
-                            if field.value == "null" {
-                                Some(Value::Null)
-                            } else if field.value.is_empty() {
-                                Some(Value::String(String::new()))
-                            } else {
-                                serde_json::from_str(&field.value).ok()
-                            }
-                        }
-                        "boolean" => Some(Value::Bool(field.value == "true")),
-                        _ => None,
-                    };
+        let exp = self.index.get(experiment_name)?;
+        let custom_fields = exp.data.custom_field_values.as_ref()?;
+        let field = custom_fields.iter().find(|f| f.name == field_name)?;
+
+        match field.field_type.as_str() {
+            "text" | "string" => Some(Value::String(field.value.clone())),
+            "number" => field
+                .value
+                .parse::<f64>()
+                .ok()
+                .map(|n| serde_json::Number::from_f64(n).map_or(Value::Null, Value::Number)),
+            "json" => {
+                if field.value == "null" {
+                    Some(Value::Null)
+                } else if field.value.is_empty() {
+                    Some(Value::String(String::new()))
+                } else {
+                    serde_json::from_str(&field.value).ok()
                 }
             }
+            "boolean" => Some(Value::Bool(field.value == "true")),
+            _ => None,
         }
-        None
     }
 
-    pub fn custom_field_value_type(&self, experiment_name: &str, field_name: &str) -> Option<String> {
-        if let Some(exp) = self.index.get(experiment_name) {
-            if let Some(ref custom_fields) = exp.data.custom_field_values {
-                if let Some(field) = custom_fields.iter().find(|f| f.name == field_name) {
-                    return Some(field.field_type.clone());
-                }
-            }
-        }
-        None
+    /// Returns the type of a custom field for the given experiment and field name.
+    pub fn custom_field_value_type(
+        &self,
+        experiment_name: &str,
+        field_name: &str,
+    ) -> Option<String> {
+        let exp = self.index.get(experiment_name)?;
+        let custom_fields = exp.data.custom_field_values.as_ref()?;
+        let field = custom_fields.iter().find(|f| f.name == field_name)?;
+        Some(field.field_type.clone())
     }
 
+    /// Returns all unique custom field names across all experiments.
     pub fn custom_field_keys(&self) -> Vec<String> {
         let mut keys = std::collections::HashSet::new();
         for exp in &self.data.experiments {
             if let Some(ref custom_fields) = exp.custom_field_values {
                 for field in custom_fields {
-                    keys.insert(field.name.clone());
+                    let _ = keys.insert(field.name.clone());
                 }
             }
         }
         keys.into_iter().collect()
     }
 
+    /// Returns the names of all experiments in the context.
     pub fn experiments(&self) -> Vec<String> {
-        self.data.experiments.iter().map(|e| e.name.clone()).collect()
+        self.data
+            .experiments
+            .iter()
+            .map(|e| e.name.clone())
+            .collect()
     }
 
+    /// Refreshes the context with new experiment data, clearing all cached assignments.
     pub fn refresh(&mut self, new_data: ContextData) {
         self.assignments.clear();
         self.init(new_data);
-        self.log_event("refresh", Some(serde_json::to_value(&self.data).unwrap_or_default()));
+        self.log_event(
+            "refresh",
+            Some(serde_json::to_value(&self.data).unwrap_or_default()),
+        );
     }
 
+    /// Publishes all pending events (exposures, goals, attributes).
     pub fn publish(&mut self) {
         if self.pending == 0 {
             return;
         }
 
         let params = self.build_publish_params();
-        self.log_event("publish", Some(serde_json::to_value(&params).unwrap_or_default()));
+        self.log_event(
+            "publish",
+            Some(serde_json::to_value(&params).unwrap_or_default()),
+        );
 
         self.pending = 0;
         self.exposures.clear();
         self.goals.clear();
     }
 
+    /// Finalizes the context, publishing any pending events and preventing further mutations.
     pub fn finalize(&mut self) {
         if self.is_finalized() {
             return;
@@ -449,6 +541,7 @@ impl Context {
         self.log_event("finalize", None);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn assign(&mut self, experiment_name: &str) -> Assignment {
         let has_custom = self.cassignments.contains_key(experiment_name);
         let has_override = self.overrides.contains_key(experiment_name);
@@ -465,7 +558,7 @@ impl Context {
                 }
             } else if !has_custom || self.cassignments[experiment_name] == cached.variant {
                 if let Some(exp) = self.index.get(experiment_name) {
-                    if self.experiment_matches(&exp.data, cached)
+                    if Self::experiment_matches(&exp.data, cached)
                         && self.audience_matches(&exp.data, cached)
                     {
                         return cached.clone();
@@ -484,7 +577,7 @@ impl Context {
         if has_override {
             if let Some(ref exp_data) = exp_data_opt {
                 assignment.id = exp_data.id;
-                assignment.unit_type = exp_data.unit_type.clone();
+                assignment.unit_type.clone_from(&exp_data.unit_type);
             }
 
             assignment.overridden = true;
@@ -525,11 +618,16 @@ impl Context {
                                     assignment.variant = self.cassignments[experiment_name];
                                     assignment.custom = true;
                                 } else {
-                                    assignment.variant = assigner.assign(
+                                    #[allow(
+                                        clippy::cast_possible_truncation,
+                                        clippy::cast_possible_wrap
+                                    )]
+                                    let v = assigner.assign(
                                         &exp_data.split,
                                         exp_data.seed_hi,
                                         exp_data.seed_lo,
                                     ) as i32;
+                                    assignment.variant = v;
                                 }
                             } else {
                                 assignment.variant = 0;
@@ -540,11 +638,13 @@ impl Context {
             } else {
                 assignment.assigned = true;
                 assignment.eligible = true;
-                assignment.variant = exp_data.full_on_variant as i32;
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                let v = exp_data.full_on_variant as i32;
+                assignment.variant = v;
                 assignment.full_on = true;
             }
 
-            assignment.unit_type = exp_data.unit_type.clone();
+            assignment.unit_type.clone_from(&exp_data.unit_type);
             assignment.id = exp_data.id;
             assignment.iteration = exp_data.iteration;
             assignment.traffic_split = Some(exp_data.traffic_split.clone());
@@ -553,17 +653,20 @@ impl Context {
         }
 
         if let Some(exp) = self.index.get(experiment_name) {
-            if (assignment.variant as usize) < exp.variables.len() {
-                assignment.variables = Some(exp.variables[assignment.variant as usize].clone());
+            #[allow(clippy::cast_sign_loss)]
+            let variant_idx = assignment.variant as usize;
+            if variant_idx < exp.variables.len() {
+                assignment.variables = Some(exp.variables[variant_idx].clone());
             }
         }
 
-        self.assignments
-            .insert(experiment_name.to_string(), assignment.clone());
+        let _ = self
+            .assignments
+            .insert(experiment_name.to_owned(), assignment.clone());
         assignment
     }
 
-    fn experiment_matches(&self, experiment: &ExperimentData, assignment: &Assignment) -> bool {
+    fn experiment_matches(experiment: &ExperimentData, assignment: &Assignment) -> bool {
         experiment.id == assignment.id
             && experiment.unit_type == assignment.unit_type
             && experiment.iteration == assignment.iteration
@@ -571,7 +674,7 @@ impl Context {
             && assignment
                 .traffic_split
                 .as_ref()
-                .map_or(false, |ts| array_equals_shallow(&experiment.traffic_split, ts))
+                .is_some_and(|ts| array_equals_shallow(&experiment.traffic_split, ts))
     }
 
     fn audience_matches(&self, experiment: &ExperimentData, assignment: &Assignment) -> bool {
@@ -579,7 +682,7 @@ impl Context {
             let attrs = self.get_attributes();
             let result = self.audience_matcher.evaluate(&experiment.audience, &attrs);
             if let Some(matched) = result {
-                return matched == !assignment.audience_mismatch;
+                return matched != assignment.audience_mismatch;
             }
         }
         true
@@ -589,7 +692,7 @@ impl Context {
         if let Some(assignment) = self.assignments.get(experiment_name) {
             let exposure = Exposure {
                 id: assignment.id,
-                name: experiment_name.to_string(),
+                name: experiment_name.to_owned(),
                 exposed_at: now_millis(),
                 unit: assignment.unit_type.clone(),
                 variant: assignment.variant,
@@ -601,7 +704,10 @@ impl Context {
                 audience_mismatch: assignment.audience_mismatch,
             };
 
-            self.log_event("exposure", Some(serde_json::to_value(&exposure).unwrap_or_default()));
+            self.log_event(
+                "exposure",
+                Some(serde_json::to_value(&exposure).unwrap_or_default()),
+            );
             self.exposures.push(exposure);
             self.pending += 1;
         }
@@ -614,7 +720,7 @@ impl Context {
 
         if let Some(unit) = self.units.get(unit_type) {
             let hash = hash_unit(unit);
-            self.hashes.insert(unit_type.to_string(), hash.clone());
+            let _ = self.hashes.insert(unit_type.to_owned(), hash.clone());
             return Some(hash);
         }
 
@@ -624,8 +730,8 @@ impl Context {
     fn build_publish_params(&self) -> PublishParams {
         let units: Vec<Unit> = self
             .units
-            .iter()
-            .map(|(unit_type, _)| Unit {
+            .keys()
+            .map(|unit_type| Unit {
                 unit_type: unit_type.clone(),
                 uid: self.hashes.get(unit_type).cloned(),
             })
@@ -660,6 +766,7 @@ impl Context {
     }
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -670,6 +777,7 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Variant;
     use serde_json::json;
 
     fn make_experiment(name: &str, variants: Vec<&str>, split: Vec<f64>) -> ExperimentData {
@@ -690,7 +798,11 @@ mod tests {
             variants: variants
                 .iter()
                 .map(|c| Variant {
-                    config: if c.is_empty() { None } else { Some(c.to_string()) },
+                    config: if c.is_empty() {
+                        None
+                    } else {
+                        Some((*c).to_string())
+                    },
                 })
                 .collect(),
             variables: HashMap::new(),
@@ -774,7 +886,11 @@ mod tests {
 
     #[test]
     fn test_context_treatment_with_experiment() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
 
@@ -785,7 +901,11 @@ mod tests {
 
     #[test]
     fn test_context_peek_does_not_queue_exposure() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
 
@@ -796,7 +916,11 @@ mod tests {
 
     #[test]
     fn test_context_treatment_queues_exposure() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
 
@@ -807,7 +931,11 @@ mod tests {
 
     #[test]
     fn test_context_treatment_only_queues_once() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
 
@@ -820,7 +948,11 @@ mod tests {
 
     #[test]
     fn test_context_set_override() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
 
@@ -832,7 +964,11 @@ mod tests {
 
     #[test]
     fn test_context_set_custom_assignment() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
 
@@ -864,7 +1000,11 @@ mod tests {
 
     #[test]
     fn test_context_publish_clears_pending() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
 
@@ -945,7 +1085,11 @@ mod tests {
 
     #[test]
     fn test_context_full_on_variant() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp.full_on_variant = 1;
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
@@ -956,7 +1100,11 @@ mod tests {
 
     #[test]
     fn test_context_audience_mismatch_strict() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
         exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
         exp.audience_strict = true;
         let data = make_context_data(vec![exp]);
@@ -970,7 +1118,11 @@ mod tests {
 
     #[test]
     fn test_context_audience_match() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
         exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
         exp.audience_strict = true;
         let data = make_context_data(vec![exp]);
@@ -1046,7 +1198,7 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut context = Context::new(data);
 
-        let attrs = std::collections::HashMap::from([
+        let attrs = HashMap::from([
             ("country".to_string(), json!("UK")),
             ("tier".to_string(), json!("gold")),
         ]);
@@ -1087,10 +1239,15 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut context = Context::new(data);
 
-        assert!(context.track("purchase", json!({
-            "item_count": 1,
-            "total_amount": 99.99
-        })).is_ok());
+        assert!(context
+            .track(
+                "purchase",
+                json!({
+                    "item_count": 1,
+                    "total_amount": 99.99
+                })
+            )
+            .is_ok());
         assert_eq!(context.pending(), 1);
     }
 
