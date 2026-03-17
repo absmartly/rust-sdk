@@ -90,7 +90,7 @@ pub fn match_op(evaluator: &Evaluator, args: &Value) -> Value {
             evaluator.string_convert(&pattern),
         ) {
             match RegexBuilder::new(&pattern_str)
-                .size_limit(10_000)
+                .size_limit(100_000)
                 .dfa_size_limit(1_000_000)
                 .build()
             {
@@ -417,5 +417,19 @@ mod tests {
         let evaluator = make_evaluator();
         assert_eq!(match_op(&evaluator, &json!([{"value": null}, {"value": "abc"}])), json!(false));
         assert_eq!(match_op(&evaluator, &json!([{"value": "abcdefghijk"}, {"value": null}])), json!(false));
+    }
+
+    #[test]
+    fn test_match_op_larger_pattern() {
+        let evaluator = make_evaluator();
+        let long_alternation: String = (0..200)
+            .map(|i| format!("option{}", i))
+            .collect::<Vec<_>>()
+            .join("|");
+        let result = match_op(
+            &evaluator,
+            &json!([{"value": "option150"}, {"value": long_alternation}]),
+        );
+        assert_eq!(result, json!(true));
     }
 }

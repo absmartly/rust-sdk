@@ -164,3 +164,42 @@ pub struct ContextOptions {
     pub refresh_period: i64,
     pub event_logger: Option<Box<dyn Fn(&crate::context::Context, &str, Option<serde_json::Value>) + Send + Sync>>,
 }
+
+impl std::fmt::Debug for ContextOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContextOptions")
+            .field("publish_delay", &self.publish_delay)
+            .field("refresh_period", &self.refresh_period)
+            .field("event_logger", &self.event_logger.as_ref().map(|_| "<closure>"))
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_context_options_debug_without_logger() {
+        let opts = ContextOptions {
+            publish_delay: 100,
+            refresh_period: 200,
+            event_logger: None,
+        };
+        let debug_str = format!("{:?}", opts);
+        assert!(debug_str.contains("publish_delay: 100"));
+        assert!(debug_str.contains("refresh_period: 200"));
+        assert!(debug_str.contains("None"));
+    }
+
+    #[test]
+    fn test_context_options_debug_with_logger() {
+        let opts = ContextOptions {
+            publish_delay: 100,
+            refresh_period: 200,
+            event_logger: Some(Box::new(|_ctx, _event, _data| {})),
+        };
+        let debug_str = format!("{:?}", opts);
+        assert!(debug_str.contains("<closure>"));
+    }
+}
