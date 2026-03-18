@@ -432,4 +432,11 @@ mod tests {
         );
         assert_eq!(result, json!(true));
     }
+
+    #[test]
+    fn test_match_op_invalid_pattern_returns_null() {
+        let evaluator = make_evaluator();
+        let result = match_op(&evaluator, &json!([{"value": "abc"}, {"value": "("}]));
+        assert_eq!(result, Value::Null);
+    }
 }

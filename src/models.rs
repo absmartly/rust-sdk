@@ -158,11 +158,11 @@ pub struct ContextParams {
     pub units: HashMap<String, String>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ContextOptions {
     pub publish_delay: i64,
     pub refresh_period: i64,
-    pub event_logger: Option<Box<dyn Fn(&crate::context::Context, &str, Option<serde_json::Value>) + Send + Sync>>,
+    pub event_logger: Option<std::sync::Arc<dyn Fn(&crate::context::Context, &str, Option<serde_json::Value>) + Send + Sync>>,
 }
 
 impl std::fmt::Debug for ContextOptions {
@@ -197,7 +197,7 @@ mod tests {
         let opts = ContextOptions {
             publish_delay: 100,
             refresh_period: 200,
-            event_logger: Some(Box::new(|_ctx, _event, _data| {})),
+            event_logger: Some(std::sync::Arc::new(|_ctx, _event, _data| {})),
         };
         let debug_str = format!("{:?}", opts);
         assert!(debug_str.contains("<closure>"));

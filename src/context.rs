@@ -9,7 +9,7 @@ use crate::matcher::AudienceMatcher;
 use crate::models::*;
 use crate::utils::{array_equals_shallow, hash_unit};
 
-pub type EventLogger = Box<dyn Fn(&Context, &str, Option<Value>) + Send + Sync>;
+pub type EventLogger = std::sync::Arc<dyn Fn(&Context, &str, Option<Value>) + Send + Sync>;
 
 struct Experiment {
     data: ExperimentData,
@@ -1336,7 +1336,7 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::new()));
         let log_clone = log.clone();
         let mut ctx = Context::new(data);
-        ctx.set_event_logger(Box::new(move |_ctx, event, data| {
+        ctx.set_event_logger(Arc::new(move |_ctx, event, data| {
             log_clone.lock().unwrap().push(LogEntry {
                 event: event.to_string(),
                 data,

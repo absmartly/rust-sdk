@@ -210,10 +210,12 @@ impl ABsmartly {
         let mut last_error = None;
 
         while retries > 0 {
-            let response = self.client.get(&url)
-                .header("X-API-Key", &self.config.api_key)
-                .send()
-                .await;
+            let mut request = self.client.get(&url)
+                .header("X-API-Key", &self.config.api_key);
+            if let Some(ref agent) = self.config.agent {
+                request = request.header("User-Agent", agent);
+            }
+            let response = request.send().await;
 
             match response {
                 Ok(resp) => {
@@ -294,19 +296,24 @@ impl ABsmartly {
             urlencoding::encode(&self.config.environment)
         );
         let api_key = self.config.api_key.clone();
+        let agent = self.config.agent.clone();
         let client = self.client.clone();
         context.set_data_fetcher(Box::new(move || {
-            let rt = tokio::runtime::Handle::try_current()
-                .map_err(|_| "No tokio runtime available for refresh".to_string())?;
-            rt.block_on(async {
-                let resp = client.get(&url)
-                    .header("X-API-Key", &api_key)
-                    .send()
-                    .await
-                    .map_err(|e| format!("Refresh fetch failed: {}", e))?;
-                resp.json::<ContextData>()
-                    .await
-                    .map_err(|e| format!("Refresh parse failed: {}", e))
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let mut request = client.get(&url)
+                        .header("X-API-Key", &api_key);
+                    if let Some(ref a) = agent {
+                        request = request.header("User-Agent", a);
+                    }
+                    let resp = request
+                        .send()
+                        .await
+                        .map_err(|e| format!("Refresh fetch failed: {}", e))?;
+                    resp.json::<ContextData>()
+                        .await
+                        .map_err(|e| format!("Refresh parse failed: {}", e))
+                })
             })
         }));
 
@@ -319,14 +326,16 @@ impl ABsmartly {
             self.config.endpoint.trim_end_matches('/')
         );
 
-        let response = self
+        let mut request = self
             .client
             .put(&url)
             .header("X-API-Key", &self.config.api_key)
             .header("Content-Type", "application/json")
-            .json(params)
-            .send()
-            .await?;
+            .json(params);
+        if let Some(ref agent) = self.config.agent {
+            request = request.header("User-Agent", agent);
+        }
+        let response = request.send().await?;
 
         if response.status().is_success() {
             Ok(())
