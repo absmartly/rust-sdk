@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::assigner::VariantAssigner;
+use crate::context_publisher::ContextPublisher;
 use crate::matcher::AudienceMatcher;
 use crate::models::*;
 use crate::utils::{array_equals_shallow, hash_unit};
@@ -39,6 +40,7 @@ pub struct Context {
     publish_delay: i64,
     refresh_period: i64,
     data_fetcher: Option<DataFetcher>,
+    publisher: Option<Box<dyn ContextPublisher>>,
 }
 
 impl Context {
@@ -65,6 +67,7 @@ impl Context {
             publish_delay: 0,
             refresh_period: 0,
             data_fetcher: None,
+            publisher: None,
         }
     }
 
@@ -115,6 +118,10 @@ impl Context {
 
     pub fn set_event_logger(&mut self, logger: EventLogger) {
         self.event_logger = Some(logger);
+    }
+
+    pub fn set_publisher(&mut self, publisher: Box<dyn ContextPublisher>) {
+        self.publisher = Some(publisher);
     }
 
     pub fn publish_delay(&self) -> i64 {
@@ -570,6 +577,10 @@ impl Context {
             Err(e) => {
                 error!("Failed to serialize publish params: {}", e);
             }
+        }
+
+        if let Some(publisher) = &self.publisher {
+            publisher.publish(&params);
         }
     }
 

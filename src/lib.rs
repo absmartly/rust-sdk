@@ -6,8 +6,10 @@ pub mod jsonexpr;
 pub mod matcher;
 pub mod models;
 pub mod context;
+pub mod context_publisher;
 pub mod sdk;
 
 pub use sdk::{ABsmartly, ABsmartlyBuilder, SDKConfig, SDKError};
 pub use context::Context;
+pub use context_publisher::{ContextPublisher, DefaultContextPublisher};
 pub use models::*;

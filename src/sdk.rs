@@ -1,4 +1,5 @@
 use crate::context::Context;
+use crate::context_publisher::DefaultContextPublisher;
 use crate::models::{ContextData, ContextOptions, PublishParams};
 use log::warn;
 use reqwest::Client;
@@ -280,6 +281,11 @@ impl ABsmartly {
                 warn!("Failed to set unit '{}': {}", unit_type, e);
             }
         }
+
+        context.set_publisher(Box::new(DefaultContextPublisher::new(
+            &self.config.endpoint,
+            &self.config.api_key,
+        )));
 
         let url = format!(
             "{}/context?application={}&environment={}",
