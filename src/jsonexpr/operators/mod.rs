@@ -54,14 +54,20 @@ pub fn not_op(evaluator: &Evaluator, args: &Value) -> Value {
     Value::Bool(!evaluator.boolean_convert(&result))
 }
 
-pub fn in_op(evaluator: &Evaluator, args: &Value) -> Value {
+/// CONTAINS operator (also registered under the legacy alias "in").
+///
+/// Operand order is haystack-first: `[haystack, needle]` — i.e. "does the
+/// haystack (arg 0) contain the needle (arg 1)". This matches the collector
+/// and the other ABsmartly SDKs. The "in" key is a historical alias kept for
+/// backwards compatibility with audiences already in production.
+pub fn contains_op(evaluator: &Evaluator, args: &Value) -> Value {
     if let Value::Array(arr) = args {
         if arr.len() != 2 {
             return Value::Bool(false);
         }
 
-        let needle = evaluator.evaluate(&arr[0]);
-        let haystack = evaluator.evaluate(&arr[1]);
+        let haystack = evaluator.evaluate(&arr[0]);
+        let needle = evaluator.evaluate(&arr[1]);
 
         match (&needle, &haystack) {
             (Value::String(n), Value::String(h)) => Value::Bool(h.contains(n.as_str())),
@@ -375,28 +381,31 @@ mod tests {
     }
 
     #[test]
-    fn test_in_op_string_contains() {
+    fn test_contains_op_string_contains() {
         let evaluator = make_evaluator();
-        assert_eq!(in_op(&evaluator, &json!([{"value": "abc"}, {"value": "abcdefghijk"}])), json!(true));
-        assert_eq!(in_op(&evaluator, &json!([{"value": "def"}, {"value": "abcdefghijk"}])), json!(true));
-        assert_eq!(in_op(&evaluator, &json!([{"value": "xyz"}, {"value": "abcdefghijk"}])), json!(false));
+        // [haystack, needle]
+        assert_eq!(contains_op(&evaluator, &json!([{"value": "abcdefghijk"}, {"value": "abc"}])), json!(true));
+        assert_eq!(contains_op(&evaluator, &json!([{"value": "abcdefghijk"}, {"value": "def"}])), json!(true));
+        assert_eq!(contains_op(&evaluator, &json!([{"value": "abcdefghijk"}, {"value": "xyz"}])), json!(false));
     }
 
     #[test]
-    fn test_in_op_array_contains() {
+    fn test_contains_op_array_contains() {
         let evaluator = make_evaluator();
-        assert_eq!(in_op(&evaluator, &json!([{"value": 1}, {"value": [1, 2, 3]}])), json!(true));
-        assert_eq!(in_op(&evaluator, &json!([{"value": 2}, {"value": [1, 2, 3]}])), json!(true));
-        assert_eq!(in_op(&evaluator, &json!([{"value": 4}, {"value": [1, 2, 3]}])), json!(false));
-        assert_eq!(in_op(&evaluator, &json!([{"value": 1}, {"value": []}])), json!(false));
+        // [haystack, needle]
+        assert_eq!(contains_op(&evaluator, &json!([{"value": [1, 2, 3]}, {"value": 1}])), json!(true));
+        assert_eq!(contains_op(&evaluator, &json!([{"value": [1, 2, 3]}, {"value": 2}])), json!(true));
+        assert_eq!(contains_op(&evaluator, &json!([{"value": [1, 2, 3]}, {"value": 4}])), json!(false));
+        assert_eq!(contains_op(&evaluator, &json!([{"value": []}, {"value": 1}])), json!(false));
     }
 
     #[test]
-    fn test_in_op_object_contains_key() {
+    fn test_contains_op_object_contains_key() {
         let evaluator = make_evaluator();
-        assert_eq!(in_op(&evaluator, &json!([{"value": "a"}, {"value": {"a": 1, "b": 2}}])), json!(true));
-        assert_eq!(in_op(&evaluator, &json!([{"value": "b"}, {"value": {"a": 1, "b": 2}}])), json!(true));
-        assert_eq!(in_op(&evaluator, &json!([{"value": "c"}, {"value": {"a": 1, "b": 2}}])), json!(false));
+        // [haystack, needle]
+        assert_eq!(contains_op(&evaluator, &json!([{"value": {"a": 1, "b": 2}}, {"value": "a"}])), json!(true));
+        assert_eq!(contains_op(&evaluator, &json!([{"value": {"a": 1, "b": 2}}, {"value": "b"}])), json!(true));
+        assert_eq!(contains_op(&evaluator, &json!([{"value": {"a": 1, "b": 2}}, {"value": "c"}])), json!(false));
     }
 
     #[test]

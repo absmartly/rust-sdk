@@ -149,7 +149,7 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert("country".to_string(), json!("US"));
 
-        let audience = r#"{"filter": {"in": [{"var": "country"}, {"value": ["US", "CA", "MX"]}]}}"#;
+        let audience = r#"{"filter": {"in": [{"value": ["US", "CA", "MX"]}, {"var": "country"}]}}"#;
         assert_eq!(matcher.evaluate(audience, &vars), Some(true));
 
         vars.insert("country".to_string(), json!("UK"));
