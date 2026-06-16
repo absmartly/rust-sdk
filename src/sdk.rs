@@ -101,30 +101,36 @@ impl ABsmartlyBuilder {
     }
 
     pub fn build(self) -> Result<ABsmartly, SDKError> {
-        let endpoint = self.endpoint.ok_or_else(|| {
-            SDKError::ConfigError("endpoint is required".to_string())
-        })?;
-        let api_key = self.api_key.ok_or_else(|| {
-            SDKError::ConfigError("api_key is required".to_string())
-        })?;
-        let application = self.application.ok_or_else(|| {
-            SDKError::ConfigError("application is required".to_string())
-        })?;
-        let environment = self.environment.ok_or_else(|| {
-            SDKError::ConfigError("environment is required".to_string())
-        })?;
+        let endpoint = self
+            .endpoint
+            .ok_or_else(|| SDKError::ConfigError("endpoint is required".to_string()))?;
+        let api_key = self
+            .api_key
+            .ok_or_else(|| SDKError::ConfigError("api_key is required".to_string()))?;
+        let application = self
+            .application
+            .ok_or_else(|| SDKError::ConfigError("application is required".to_string()))?;
+        let environment = self
+            .environment
+            .ok_or_else(|| SDKError::ConfigError("environment is required".to_string()))?;
 
         if endpoint.is_empty() {
-            return Err(SDKError::ConfigError("endpoint cannot be empty".to_string()));
+            return Err(SDKError::ConfigError(
+                "endpoint cannot be empty".to_string(),
+            ));
         }
         if api_key.is_empty() {
             return Err(SDKError::ConfigError("api_key cannot be empty".to_string()));
         }
         if application.is_empty() {
-            return Err(SDKError::ConfigError("application cannot be empty".to_string()));
+            return Err(SDKError::ConfigError(
+                "application cannot be empty".to_string(),
+            ));
         }
         if environment.is_empty() {
-            return Err(SDKError::ConfigError("environment cannot be empty".to_string()));
+            return Err(SDKError::ConfigError(
+                "environment cannot be empty".to_string(),
+            ));
         }
 
         let config = SDKConfig {
@@ -210,7 +216,9 @@ impl ABsmartly {
         let mut last_error = None;
 
         while retries > 0 {
-            let mut request = self.client.get(&url)
+            let mut request = self
+                .client
+                .get(&url)
                 .header("X-API-Key", &self.config.api_key);
             if let Some(ref agent) = self.config.agent {
                 request = request.header("User-Agent", agent);
@@ -224,11 +232,14 @@ impl ABsmartly {
                         return Ok(self.create_context_with_internal(units_vec, data, options));
                     } else if resp.status().is_server_error() {
                         retries -= 1;
-                        last_error = Some(SDKError::HttpError(
-                            resp.error_for_status().unwrap_err(),
-                        ));
+                        last_error =
+                            Some(SDKError::HttpError(resp.error_for_status().unwrap_err()));
                         let max_retries = self.config.retries.unwrap_or(5);
-                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms(max_retries, retries))).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms(
+                            max_retries,
+                            retries,
+                        )))
+                        .await;
                         continue;
                     } else {
                         return Err(SDKError::HttpError(resp.error_for_status().unwrap_err()));
@@ -239,7 +250,11 @@ impl ABsmartly {
                     last_error = Some(SDKError::HttpError(e));
                     if retries > 0 {
                         let max_retries = self.config.retries.unwrap_or(5);
-                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms(max_retries, retries))).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms(
+                            max_retries,
+                            retries,
+                        )))
+                        .await;
                     }
                 }
             }
@@ -301,8 +316,7 @@ impl ABsmartly {
         context.set_data_fetcher(Box::new(move || {
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    let mut request = client.get(&url)
-                        .header("X-API-Key", &api_key);
+                    let mut request = client.get(&url).header("X-API-Key", &api_key);
                     if let Some(ref a) = agent {
                         request = request.header("User-Agent", a);
                     }
@@ -321,10 +335,7 @@ impl ABsmartly {
     }
 
     pub async fn publish(&self, params: &PublishParams) -> Result<(), SDKError> {
-        let url = format!(
-            "{}/context",
-            self.config.endpoint.trim_end_matches('/')
-        );
+        let url = format!("{}/context", self.config.endpoint.trim_end_matches('/'));
 
         let mut request = self
             .client
@@ -340,7 +351,9 @@ impl ABsmartly {
         if response.status().is_success() {
             Ok(())
         } else {
-            Err(SDKError::HttpError(response.error_for_status().unwrap_err()))
+            Err(SDKError::HttpError(
+                response.error_for_status().unwrap_err(),
+            ))
         }
     }
 }
@@ -351,7 +364,9 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_context_data() -> ContextData {
-        ContextData { experiments: vec![] }
+        ContextData {
+            experiments: vec![],
+        }
     }
 
     #[test]
@@ -434,7 +449,10 @@ mod tests {
         );
 
         assert_eq!(context.get_unit("session_id"), Some(&"user123".to_string()));
-        assert_eq!(context.get_unit("device_id"), Some(&"device456".to_string()));
+        assert_eq!(
+            context.get_unit("device_id"),
+            Some(&"device456".to_string())
+        );
     }
 
     #[test]
@@ -456,7 +474,10 @@ mod tests {
         let context = sdk.create_context_with(units, data, None);
 
         assert_eq!(context.get_unit("session_id"), Some(&"user123".to_string()));
-        assert_eq!(context.get_unit("device_id"), Some(&"device456".to_string()));
+        assert_eq!(
+            context.get_unit("device_id"),
+            Some(&"device456".to_string())
+        );
     }
 
     #[test]
@@ -477,7 +498,10 @@ mod tests {
         let context = sdk.create_context_with(units, data, None);
 
         assert_eq!(context.get_unit("session_id"), Some(&"user123".to_string()));
-        assert_eq!(context.get_unit("device_id"), Some(&"device456".to_string()));
+        assert_eq!(
+            context.get_unit("device_id"),
+            Some(&"device456".to_string())
+        );
     }
 
     #[test]
@@ -510,22 +534,19 @@ mod tests {
 
     #[test]
     fn test_sdk_config_with_agent() {
-        let config = SDKConfig::new("endpoint", "key", "app", "env")
-            .with_agent("test-agent");
+        let config = SDKConfig::new("endpoint", "key", "app", "env").with_agent("test-agent");
         assert_eq!(config.agent, Some("test-agent".to_string()));
     }
 
     #[test]
     fn test_sdk_config_with_timeout() {
-        let config = SDKConfig::new("endpoint", "key", "app", "env")
-            .with_timeout(5000);
+        let config = SDKConfig::new("endpoint", "key", "app", "env").with_timeout(5000);
         assert_eq!(config.timeout_ms, Some(5000));
     }
 
     #[test]
     fn test_sdk_config_with_retries() {
-        let config = SDKConfig::new("endpoint", "key", "app", "env")
-            .with_retries(10);
+        let config = SDKConfig::new("endpoint", "key", "app", "env").with_retries(10);
         assert_eq!(config.retries, Some(10));
     }
 

@@ -331,7 +331,11 @@ impl Context {
         Ok(())
     }
 
-    pub fn set_custom_assignment(&mut self, experiment_name: &str, variant: i32) -> Result<(), String> {
+    pub fn set_custom_assignment(
+        &mut self,
+        experiment_name: &str,
+        variant: i32,
+    ) -> Result<(), String> {
         if self.is_finalized() {
             return Err("ABsmartly Context is finalized.".to_string());
         }
@@ -453,18 +457,23 @@ impl Context {
                 if let Some(field) = custom_fields.iter().find(|f| f.name == field_name) {
                     return match field.field_type.as_str() {
                         "text" | "string" => Some(Value::String(field.value.clone())),
-                        "number" => match field.value.parse::<f64>() {
-                            Ok(n) => serde_json::Number::from_f64(n)
-                                .map(Value::Number)
-                                .or_else(|| {
-                                    warn!("Custom field '{}' number out of range: {}", field_name, n);
+                        "number" => {
+                            match field.value.parse::<f64>() {
+                                Ok(n) => serde_json::Number::from_f64(n)
+                                    .map(Value::Number)
+                                    .or_else(|| {
+                                        warn!(
+                                            "Custom field '{}' number out of range: {}",
+                                            field_name, n
+                                        );
+                                        None
+                                    }),
+                                Err(e) => {
+                                    error!("Failed to parse custom field '{}' as number: {}. Value: '{}'", field_name, e, field.value);
                                     None
-                                }),
-                            Err(e) => {
-                                error!("Failed to parse custom field '{}' as number: {}. Value: '{}'", field_name, e, field.value);
-                                None
+                                }
                             }
-                        },
+                        }
                         "json" => {
                             if field.value == "null" {
                                 Some(Value::Null)
@@ -482,7 +491,10 @@ impl Context {
                         }
                         "boolean" => Some(Value::Bool(field.value == "true")),
                         _ => {
-                            warn!("Unknown custom field type '{}' for field '{}'", field.field_type, field_name);
+                            warn!(
+                                "Unknown custom field type '{}' for field '{}'",
+                                field.field_type, field_name
+                            );
                             None
                         }
                     };
@@ -492,7 +504,11 @@ impl Context {
         None
     }
 
-    pub fn custom_field_value_type(&self, experiment_name: &str, field_name: &str) -> Option<String> {
+    pub fn custom_field_value_type(
+        &self,
+        experiment_name: &str,
+        field_name: &str,
+    ) -> Option<String> {
         if let Some(exp) = self.index.get(experiment_name) {
             if let Some(ref custom_fields) = exp.data.custom_field_values {
                 if let Some(field) = custom_fields.iter().find(|f| f.name == field_name) {
@@ -516,7 +532,11 @@ impl Context {
     }
 
     pub fn experiments(&self) -> Vec<String> {
-        self.data.experiments.iter().map(|e| e.name.clone()).collect()
+        self.data
+            .experiments
+            .iter()
+            .map(|e| e.name.clone())
+            .collect()
     }
 
     pub fn set_data_fetcher(&mut self, fetcher: DataFetcher) {
@@ -524,7 +544,9 @@ impl Context {
     }
 
     pub fn refresh(&mut self) -> Result<(), String> {
-        let fetcher = self.data_fetcher.as_ref()
+        let fetcher = self
+            .data_fetcher
+            .as_ref()
             .ok_or_else(|| "Cannot refresh: no data fetcher configured".to_string())?;
         let new_data = fetcher()?;
         self.refresh_with(new_data);
@@ -546,7 +568,11 @@ impl Context {
                         None => assignment.assigned,
                         Some(exp) => !Self::experiment_matches(&exp.data, assignment),
                     };
-                    if should_remove { Some(name.clone()) } else { None }
+                    if should_remove {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
                 })
                 .collect()
         };
@@ -687,7 +713,8 @@ impl Context {
                                         &exp_data.split,
                                         exp_data.seed_hi,
                                         exp_data.seed_lo,
-                                    ) as i32;
+                                    )
+                                        as i32;
                                 }
                             } else {
                                 assignment.variant = 0;
@@ -729,7 +756,7 @@ impl Context {
             && assignment
                 .traffic_split
                 .as_ref()
-                .map_or(false, |ts| array_equals_shallow(&experiment.traffic_split, ts))
+                .is_some_and(|ts| array_equals_shallow(&experiment.traffic_split, ts))
     }
 
     fn audience_matches(&self, experiment: &ExperimentData, assignment: &Assignment) -> bool {
@@ -737,7 +764,7 @@ impl Context {
             let attrs = self.get_attributes();
             let result = self.audience_matcher.evaluate(&experiment.audience, &attrs);
             if let Some(matched) = result {
-                return matched == !assignment.audience_mismatch;
+                return matched != assignment.audience_mismatch;
             }
         }
         true
@@ -762,7 +789,10 @@ impl Context {
             match serde_json::to_value(&exposure) {
                 Ok(value) => self.log_event("exposure", Some(value)),
                 Err(e) => {
-                    error!("Failed to serialize exposure for experiment '{}': {}", experiment_name, e);
+                    error!(
+                        "Failed to serialize exposure for experiment '{}': {}",
+                        experiment_name, e
+                    );
                 }
             }
             self.exposures.push(exposure);
@@ -792,8 +822,8 @@ impl Context {
 
         let units: Vec<Unit> = self
             .units
-            .iter()
-            .map(|(unit_type, _)| Unit {
+            .keys()
+            .map(|unit_type| Unit {
                 unit_type: unit_type.clone(),
                 uid: self.hashes.get(unit_type).cloned(),
             })
@@ -861,7 +891,11 @@ mod tests {
             variants: variants
                 .iter()
                 .map(|c| Variant {
-                    config: if c.is_empty() { None } else { Some(c.to_string()) },
+                    config: if c.is_empty() {
+                        None
+                    } else {
+                        Some(c.to_string())
+                    },
                 })
                 .collect(),
             variables: HashMap::new(),
@@ -902,7 +936,10 @@ mod tests {
         let mut context = Context::new_loading();
         context.become_failed_with_error("data fetch failed".to_string());
         assert!(context.is_failed());
-        assert_eq!(context.ready_error(), Some(&"data fetch failed".to_string()));
+        assert_eq!(
+            context.ready_error(),
+            Some(&"data fetch failed".to_string())
+        );
     }
 
     #[test]
@@ -968,7 +1005,11 @@ mod tests {
 
     #[test]
     fn test_context_treatment_with_experiment() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
 
@@ -979,7 +1020,11 @@ mod tests {
 
     #[test]
     fn test_context_peek_does_not_queue_exposure() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
 
@@ -990,7 +1035,11 @@ mod tests {
 
     #[test]
     fn test_context_treatment_queues_exposure() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
 
@@ -1001,7 +1050,11 @@ mod tests {
 
     #[test]
     fn test_context_treatment_only_queues_once() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
 
@@ -1014,7 +1067,11 @@ mod tests {
 
     #[test]
     fn test_context_set_override() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
 
@@ -1026,7 +1083,11 @@ mod tests {
 
     #[test]
     fn test_context_set_custom_assignment() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
 
@@ -1058,7 +1119,11 @@ mod tests {
 
     #[test]
     fn test_context_publish_clears_pending() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
 
@@ -1139,7 +1204,11 @@ mod tests {
 
     #[test]
     fn test_context_full_on_variant() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp.full_on_variant = 1;
         let data = make_context_data(vec![exp]);
         let mut context = Context::new(data);
@@ -1150,7 +1219,11 @@ mod tests {
 
     #[test]
     fn test_context_audience_mismatch_strict() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
         exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
         exp.audience_strict = true;
         let data = make_context_data(vec![exp]);
@@ -1164,7 +1237,11 @@ mod tests {
 
     #[test]
     fn test_context_audience_match() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
         exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
         exp.audience_strict = true;
         let data = make_context_data(vec![exp]);
@@ -1282,10 +1359,15 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut context = Context::new(data);
 
-        assert!(context.track("purchase", json!({
-            "item_count": 1,
-            "total_amount": 99.99
-        })).is_ok());
+        assert!(context
+            .track(
+                "purchase",
+                json!({
+                    "item_count": 1,
+                    "total_amount": 99.99
+                })
+            )
+            .is_ok());
         assert_eq!(context.pending(), 1);
     }
 
@@ -1298,7 +1380,12 @@ mod tests {
         assert_eq!(context.pending(), 1);
     }
 
-    fn make_experiment_with_id(name: &str, id: i64, variants: Vec<&str>, split: Vec<f64>) -> ExperimentData {
+    fn make_experiment_with_id(
+        name: &str,
+        id: i64,
+        variants: Vec<&str>,
+        split: Vec<f64>,
+    ) -> ExperimentData {
         ExperimentData {
             id,
             name: name.to_string(),
@@ -1316,7 +1403,11 @@ mod tests {
             variants: variants
                 .iter()
                 .map(|c| Variant {
-                    config: if c.is_empty() { None } else { Some(c.to_string()) },
+                    config: if c.is_empty() {
+                        None
+                    } else {
+                        Some(c.to_string())
+                    },
                 })
                 .collect(),
             variables: HashMap::new(),
@@ -1347,7 +1438,11 @@ mod tests {
 
     #[test]
     fn test_event_logger_on_exposure() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let (mut ctx, log) = make_logging_context(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1371,7 +1466,11 @@ mod tests {
 
     #[test]
     fn test_event_logger_on_publish() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let (mut ctx, log) = make_logging_context(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1507,7 +1606,11 @@ mod tests {
 
     #[test]
     fn test_treatment_queues_exposure_after_peek() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1521,7 +1624,11 @@ mod tests {
 
     #[test]
     fn test_treatment_queues_exposure_with_override_variant() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let (mut ctx, log) = make_logging_context(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1539,7 +1646,11 @@ mod tests {
 
     #[test]
     fn test_treatment_queues_exposure_with_custom_assignment_variant() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let (mut ctx, log) = make_logging_context(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1578,7 +1689,11 @@ mod tests {
 
     #[test]
     fn test_peek_returns_override_variant() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1590,7 +1705,11 @@ mod tests {
 
     #[test]
     fn test_peek_audience_mismatch_non_strict() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
         exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
         exp.audience_strict = false;
         let data = make_context_data(vec![exp]);
@@ -1604,7 +1723,11 @@ mod tests {
 
     #[test]
     fn test_peek_audience_mismatch_strict() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
         exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
         exp.audience_strict = true;
         let data = make_context_data(vec![exp]);
@@ -1617,7 +1740,11 @@ mod tests {
 
     #[test]
     fn test_treatment_audience_match_queues_with_audience_mismatch_false() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
         exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
         exp.audience_strict = false;
         let data = make_context_data(vec![exp]);
@@ -1635,7 +1762,11 @@ mod tests {
 
     #[test]
     fn test_treatment_audience_mismatch_queues_with_audience_mismatch_true() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
         exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
         exp.audience_strict = false;
         let data = make_context_data(vec![exp]);
@@ -1653,7 +1784,11 @@ mod tests {
 
     #[test]
     fn test_treatment_audience_mismatch_strict_queues_control() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
         exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
         exp.audience_strict = true;
         let data = make_context_data(vec![exp]);
@@ -1673,7 +1808,11 @@ mod tests {
 
     #[test]
     fn test_variable_value_returns_default_when_unassigned() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![1.0, 0.0]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![1.0, 0.0],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1684,7 +1823,11 @@ mod tests {
 
     #[test]
     fn test_variable_value_returns_override_values() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1696,7 +1839,11 @@ mod tests {
 
     #[test]
     fn test_variable_value_queues_exposure() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1707,7 +1854,11 @@ mod tests {
 
     #[test]
     fn test_variable_value_queues_exposure_after_peek() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1721,7 +1872,11 @@ mod tests {
 
     #[test]
     fn test_variable_value_queues_exposure_only_once() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1734,7 +1889,11 @@ mod tests {
 
     #[test]
     fn test_peek_variable_value_does_not_queue_exposure() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1745,7 +1904,11 @@ mod tests {
 
     #[test]
     fn test_peek_variable_value_returns_override_values() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1757,7 +1920,11 @@ mod tests {
 
     #[test]
     fn test_peek_variable_value_returns_default_when_unassigned() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![1.0, 0.0]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![1.0, 0.0],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1768,7 +1935,11 @@ mod tests {
 
     #[test]
     fn test_variable_keys_returns_all_active_keys() {
-        let exp1 = make_experiment("exp1", vec!["{}", r#"{"button":"red","header":"large"}"#], vec![0.5, 0.5]);
+        let exp1 = make_experiment(
+            "exp1",
+            vec!["{}", r#"{"button":"red","header":"large"}"#],
+            vec![0.5, 0.5],
+        );
         let exp2 = make_experiment("exp2", vec!["{}", r#"{"color":"blue"}"#], vec![0.5, 0.5]);
         let data = make_context_data(vec![exp1, exp2]);
         let ctx = Context::new(data);
@@ -1793,7 +1964,9 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut ctx = Context::new(data);
 
-        assert!(ctx.track("purchase", json!({"amount": 99.99, "count": 1})).is_ok());
+        assert!(ctx
+            .track("purchase", json!({"amount": 99.99, "count": 1}))
+            .is_ok());
         assert_eq!(ctx.pending(), 1);
     }
 
@@ -1825,7 +1998,11 @@ mod tests {
 
     #[test]
     fn test_publish_clears_queue_on_success() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1852,7 +2029,11 @@ mod tests {
 
     #[test]
     fn test_finalize_calls_publish_when_pending() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let (mut ctx, log) = make_logging_context(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1882,7 +2063,11 @@ mod tests {
 
     #[test]
     fn test_refresh_keeps_overrides() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp.clone()]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1898,7 +2083,11 @@ mod tests {
 
     #[test]
     fn test_refresh_keeps_custom_assignments() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp.clone()]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1914,14 +2103,22 @@ mod tests {
 
     #[test]
     fn test_refresh_picks_up_fullon_change() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
 
         ctx.treatment("test_exp");
 
-        let mut exp2 = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp2 = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp2.full_on_variant = 1;
         let data2 = make_context_data(vec![exp2]);
         ctx.set_data_fetcher(Box::new(move || Ok(data2.clone())));
@@ -1932,14 +2129,22 @@ mod tests {
 
     #[test]
     fn test_refresh_picks_up_traffic_split_change() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
 
         ctx.treatment("test_exp");
 
-        let mut exp2 = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp2 = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp2.traffic_split = vec![0.0, 1.0];
         let data2 = make_context_data(vec![exp2]);
         ctx.set_data_fetcher(Box::new(move || Ok(data2.clone())));
@@ -1951,7 +2156,11 @@ mod tests {
 
     #[test]
     fn test_refresh_picks_up_iteration_change() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1959,7 +2168,11 @@ mod tests {
         ctx.treatment("test_exp");
         let pending_before = ctx.pending();
 
-        let mut exp2 = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp2 = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp2.iteration = 2;
         let data2 = make_context_data(vec![exp2]);
         ctx.set_data_fetcher(Box::new(move || Ok(data2.clone())));
@@ -1971,7 +2184,12 @@ mod tests {
 
     #[test]
     fn test_refresh_picks_up_id_change() {
-        let exp = make_experiment_with_id("test_exp", 1, vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment_with_id(
+            "test_exp",
+            1,
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -1979,7 +2197,12 @@ mod tests {
         ctx.treatment("test_exp");
         let pending_before = ctx.pending();
 
-        let exp2 = make_experiment_with_id("test_exp", 2, vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp2 = make_experiment_with_id(
+            "test_exp",
+            2,
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data2 = make_context_data(vec![exp2]);
         ctx.set_data_fetcher(Box::new(move || Ok(data2.clone())));
         ctx.refresh().unwrap();
@@ -1990,7 +2213,11 @@ mod tests {
 
     #[test]
     fn test_refresh_no_change_same_variant() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp.clone()]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -2008,7 +2235,11 @@ mod tests {
 
     #[test]
     fn test_custom_field_keys() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp.custom_field_values = Some(vec![
             CustomFieldValue {
                 name: "country".to_string(),
@@ -2031,7 +2262,11 @@ mod tests {
 
     #[test]
     fn test_custom_field_value_string() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp.custom_field_values = Some(vec![CustomFieldValue {
             name: "country".to_string(),
             value: "US".to_string(),
@@ -2040,12 +2275,19 @@ mod tests {
         let data = make_context_data(vec![exp]);
         let ctx = Context::new(data);
 
-        assert_eq!(ctx.custom_field_value("test_exp", "country"), Some(json!("US")));
+        assert_eq!(
+            ctx.custom_field_value("test_exp", "country"),
+            Some(json!("US"))
+        );
     }
 
     #[test]
     fn test_custom_field_value_text() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp.custom_field_values = Some(vec![CustomFieldValue {
             name: "description".to_string(),
             value: "A test experiment".to_string(),
@@ -2054,12 +2296,19 @@ mod tests {
         let data = make_context_data(vec![exp]);
         let ctx = Context::new(data);
 
-        assert_eq!(ctx.custom_field_value("test_exp", "description"), Some(json!("A test experiment")));
+        assert_eq!(
+            ctx.custom_field_value("test_exp", "description"),
+            Some(json!("A test experiment"))
+        );
     }
 
     #[test]
     fn test_custom_field_value_json() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp.custom_field_values = Some(vec![CustomFieldValue {
             name: "overrides".to_string(),
             value: r#"{"key":"value"}"#.to_string(),
@@ -2068,12 +2317,19 @@ mod tests {
         let data = make_context_data(vec![exp]);
         let ctx = Context::new(data);
 
-        assert_eq!(ctx.custom_field_value("test_exp", "overrides"), Some(json!({"key": "value"})));
+        assert_eq!(
+            ctx.custom_field_value("test_exp", "overrides"),
+            Some(json!({"key": "value"}))
+        );
     }
 
     #[test]
     fn test_custom_field_value_number() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp.custom_field_values = Some(vec![CustomFieldValue {
             name: "priority".to_string(),
             value: "5".to_string(),
@@ -2082,12 +2338,19 @@ mod tests {
         let data = make_context_data(vec![exp]);
         let ctx = Context::new(data);
 
-        assert_eq!(ctx.custom_field_value("test_exp", "priority"), Some(json!(5.0)));
+        assert_eq!(
+            ctx.custom_field_value("test_exp", "priority"),
+            Some(json!(5.0))
+        );
     }
 
     #[test]
     fn test_custom_field_value_decimal() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp.custom_field_values = Some(vec![CustomFieldValue {
             name: "weight".to_string(),
             value: "1.5".to_string(),
@@ -2096,12 +2359,19 @@ mod tests {
         let data = make_context_data(vec![exp]);
         let ctx = Context::new(data);
 
-        assert_eq!(ctx.custom_field_value("test_exp", "weight"), Some(json!(1.5)));
+        assert_eq!(
+            ctx.custom_field_value("test_exp", "weight"),
+            Some(json!(1.5))
+        );
     }
 
     #[test]
     fn test_custom_field_value_boolean() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp.custom_field_values = Some(vec![CustomFieldValue {
             name: "enabled".to_string(),
             value: "true".to_string(),
@@ -2110,12 +2380,19 @@ mod tests {
         let data = make_context_data(vec![exp]);
         let ctx = Context::new(data);
 
-        assert_eq!(ctx.custom_field_value("test_exp", "enabled"), Some(json!(true)));
+        assert_eq!(
+            ctx.custom_field_value("test_exp", "enabled"),
+            Some(json!(true))
+        );
     }
 
     #[test]
     fn test_custom_field_value_boolean_false() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp.custom_field_values = Some(vec![CustomFieldValue {
             name: "enabled".to_string(),
             value: "false".to_string(),
@@ -2124,12 +2401,19 @@ mod tests {
         let data = make_context_data(vec![exp]);
         let ctx = Context::new(data);
 
-        assert_eq!(ctx.custom_field_value("test_exp", "enabled"), Some(json!(false)));
+        assert_eq!(
+            ctx.custom_field_value("test_exp", "enabled"),
+            Some(json!(false))
+        );
     }
 
     #[test]
     fn test_custom_field_value_null_for_nonexistent_field() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp.custom_field_values = Some(vec![CustomFieldValue {
             name: "country".to_string(),
             value: "US".to_string(),
@@ -2151,7 +2435,11 @@ mod tests {
 
     #[test]
     fn test_custom_field_value_null_for_experiment_without_custom_fields() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let ctx = Context::new(data);
 
@@ -2160,7 +2448,11 @@ mod tests {
 
     #[test]
     fn test_custom_field_value_type() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp.custom_field_values = Some(vec![
             CustomFieldValue {
                 name: "country".to_string(),
@@ -2181,9 +2473,18 @@ mod tests {
         let data = make_context_data(vec![exp]);
         let ctx = Context::new(data);
 
-        assert_eq!(ctx.custom_field_value_type("test_exp", "country"), Some("string".to_string()));
-        assert_eq!(ctx.custom_field_value_type("test_exp", "priority"), Some("number".to_string()));
-        assert_eq!(ctx.custom_field_value_type("test_exp", "enabled"), Some("boolean".to_string()));
+        assert_eq!(
+            ctx.custom_field_value_type("test_exp", "country"),
+            Some("string".to_string())
+        );
+        assert_eq!(
+            ctx.custom_field_value_type("test_exp", "priority"),
+            Some("number".to_string())
+        );
+        assert_eq!(
+            ctx.custom_field_value_type("test_exp", "enabled"),
+            Some("boolean".to_string())
+        );
         assert_eq!(ctx.custom_field_value_type("test_exp", "nonexistent"), None);
     }
 
@@ -2215,10 +2516,8 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut ctx = Context::new(data);
 
-        ctx.set_units([
-            ("session_id", "user123"),
-            ("device_id", "device456"),
-        ]).unwrap();
+        ctx.set_units([("session_id", "user123"), ("device_id", "device456")])
+            .unwrap();
 
         assert_eq!(ctx.get_unit("session_id"), Some(&"user123".to_string()));
         assert_eq!(ctx.get_unit("device_id"), Some(&"device456".to_string()));
@@ -2246,7 +2545,8 @@ mod tests {
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
 
-        ctx.set_custom_assignments([("exp1", 1), ("exp2", 0)]).unwrap();
+        ctx.set_custom_assignments([("exp1", 1), ("exp2", 0)])
+            .unwrap();
 
         assert_eq!(ctx.treatment("exp1"), 1);
         assert_eq!(ctx.treatment("exp2"), 0);
@@ -2312,12 +2612,19 @@ mod tests {
         let data = make_context_data(vec![exp]);
         let ctx = Context::new(data);
 
-        assert_eq!(ctx.custom_field_value("test_exp", "nullfield"), Some(Value::Null));
+        assert_eq!(
+            ctx.custom_field_value("test_exp", "nullfield"),
+            Some(Value::Null)
+        );
     }
 
     #[test]
     fn test_variable_value_audience_mismatch_strict_returns_default() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
         exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
         exp.audience_strict = true;
         let data = make_context_data(vec![exp]);
@@ -2331,7 +2638,11 @@ mod tests {
 
     #[test]
     fn test_variable_value_audience_match_returns_value() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.0, 1.0]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
         exp.audience = r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#.to_string();
         exp.audience_strict = true;
         let data = make_context_data(vec![exp]);
@@ -2368,7 +2679,11 @@ mod tests {
 
     #[test]
     fn test_custom_field_number_out_of_range_returns_none() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp.custom_field_values = Some(vec![CustomFieldValue {
             name: "bad_num".to_string(),
             value: "NaN".to_string(),
@@ -2382,7 +2697,11 @@ mod tests {
 
     #[test]
     fn test_custom_field_infinity_returns_none() {
-        let mut exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         exp.custom_field_values = Some(vec![CustomFieldValue {
             name: "inf_num".to_string(),
             value: "inf".to_string(),
@@ -2396,7 +2715,11 @@ mod tests {
 
     #[test]
     fn test_publish_clears_pending_even_on_serialization_path() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
@@ -2414,7 +2737,11 @@ mod tests {
 
     #[test]
     fn test_variable_keys_returns_clone() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red","header":"large"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red","header":"large"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let ctx = Context::new(data);
 
@@ -2425,7 +2752,11 @@ mod tests {
 
     #[test]
     fn test_publish_params_include_all_unit_hashes() {
-        let exp = make_experiment("test_exp", vec!["{}", r#"{"button":"red"}"#], vec![0.5, 0.5]);
+        let exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.5, 0.5],
+        );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
 
@@ -2436,7 +2767,11 @@ mod tests {
 
         let params = ctx.get_publish_params();
         for unit in &params.units {
-            assert!(unit.uid.is_some(), "Unit '{}' should have a hashed uid", unit.unit_type);
+            assert!(
+                unit.uid.is_some(),
+                "Unit '{}' should have a hashed uid",
+                unit.unit_type
+            );
         }
         assert_eq!(params.units.len(), 2);
     }
@@ -2498,7 +2833,10 @@ mod tests {
         let mut ctx = Context::new(data);
 
         let result = ctx.set_unit("session_id", "");
-        assert_eq!(result.unwrap_err(), "Unit 'session_id' UID must not be blank.");
+        assert_eq!(
+            result.unwrap_err(),
+            "Unit 'session_id' UID must not be blank."
+        );
     }
 
     #[test]

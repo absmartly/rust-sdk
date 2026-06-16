@@ -30,7 +30,10 @@ impl AudienceMatcher {
                 None
             }
             Err(e) => {
-                error!("Failed to parse audience JSON: {}. Input: '{}'", e, audience_string);
+                error!(
+                    "Failed to parse audience JSON: {}. Input: '{}'",
+                    e, audience_string
+                );
                 None
             }
         }
@@ -74,11 +77,26 @@ mod tests {
         let matcher = AudienceMatcher::new();
         let vars = HashMap::new();
 
-        assert_eq!(matcher.evaluate(r#"{"filter":[{"value":5}]}"#, &vars), Some(true));
-        assert_eq!(matcher.evaluate(r#"{"filter":[{"value":true}]}"#, &vars), Some(true));
-        assert_eq!(matcher.evaluate(r#"{"filter":[{"value":1}]}"#, &vars), Some(true));
-        assert_eq!(matcher.evaluate(r#"{"filter":[{"value":null}]}"#, &vars), Some(false));
-        assert_eq!(matcher.evaluate(r#"{"filter":[{"value":0}]}"#, &vars), Some(false));
+        assert_eq!(
+            matcher.evaluate(r#"{"filter":[{"value":5}]}"#, &vars),
+            Some(true)
+        );
+        assert_eq!(
+            matcher.evaluate(r#"{"filter":[{"value":true}]}"#, &vars),
+            Some(true)
+        );
+        assert_eq!(
+            matcher.evaluate(r#"{"filter":[{"value":1}]}"#, &vars),
+            Some(true)
+        );
+        assert_eq!(
+            matcher.evaluate(r#"{"filter":[{"value":null}]}"#, &vars),
+            Some(false)
+        );
+        assert_eq!(
+            matcher.evaluate(r#"{"filter":[{"value":0}]}"#, &vars),
+            Some(false)
+        );
     }
 
     #[test]

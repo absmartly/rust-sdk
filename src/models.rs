@@ -138,8 +138,9 @@ pub struct PublishParams {
     pub attributes: Option<Vec<Attribute>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ContextState {
+    #[default]
     Loading,
     Ready,
     Failed,
@@ -147,22 +148,20 @@ pub enum ContextState {
     Finalized,
 }
 
-impl Default for ContextState {
-    fn default() -> Self {
-        Self::Loading
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct ContextParams {
     pub units: HashMap<String, String>,
 }
 
+/// Event logger callback: invoked with the context, the event name, and optional data.
+pub type EventLogger =
+    std::sync::Arc<dyn Fn(&crate::context::Context, &str, Option<serde_json::Value>) + Send + Sync>;
+
 #[derive(Clone, Default)]
 pub struct ContextOptions {
     pub publish_delay: i64,
     pub refresh_period: i64,
-    pub event_logger: Option<std::sync::Arc<dyn Fn(&crate::context::Context, &str, Option<serde_json::Value>) + Send + Sync>>,
+    pub event_logger: Option<EventLogger>,
 }
 
 impl std::fmt::Debug for ContextOptions {
@@ -170,7 +169,10 @@ impl std::fmt::Debug for ContextOptions {
         f.debug_struct("ContextOptions")
             .field("publish_delay", &self.publish_delay)
             .field("refresh_period", &self.refresh_period)
-            .field("event_logger", &self.event_logger.as_ref().map(|_| "<closure>"))
+            .field(
+                "event_logger",
+                &self.event_logger.as_ref().map(|_| "<closure>"),
+            )
             .finish()
     }
 }

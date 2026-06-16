@@ -51,7 +51,10 @@ mod tests {
     #[test]
     fn test_base64_url_no_padding_special_chars() {
         let special = "special characters açb↓c".as_bytes();
-        assert_eq!(base64_url_no_padding(special), "c3BlY2lhbCBjaGFyYWN0ZXJzIGHDp2LihpNj");
+        assert_eq!(
+            base64_url_no_padding(special),
+            "c3BlY2lhbCBjaGFyYWN0ZXJzIGHDp2LihpNj"
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ impl Evaluator {
         match expr {
             Value::Array(arr) => operators::and_op(self, &Value::Array(arr.clone())),
             Value::Object(map) => {
-                for (key, value) in map.iter() {
+                if let Some((key, value)) = map.iter().next() {
                     match key.as_str() {
                         "and" => return operators::and_op(self, value),
                         "or" => return operators::or_op(self, value),
@@ -34,7 +34,6 @@ impl Evaluator {
                         "lte" => return operators::lte_op(self, value),
                         _ => {}
                     }
-                    break;
                 }
                 Value::Null
             }
@@ -176,7 +175,7 @@ pub fn values_equal_deep(a: &Value, b: &Value) -> bool {
         (Value::Null, Value::Null) => true,
         (Value::Bool(ab), Value::Bool(bb)) => ab == bb,
         (Value::Number(an), Value::Number(bn)) => {
-            an.as_f64().zip(bn.as_f64()).map_or(false, |(a, b)| {
+            an.as_f64().zip(bn.as_f64()).is_some_and(|(a, b)| {
                 if a.is_nan() && b.is_nan() {
                     true
                 } else {
@@ -186,11 +185,17 @@ pub fn values_equal_deep(a: &Value, b: &Value) -> bool {
         }
         (Value::String(as_), Value::String(bs)) => as_ == bs,
         (Value::Array(aa), Value::Array(ba)) => {
-            aa.len() == ba.len() && aa.iter().zip(ba.iter()).all(|(x, y)| values_equal_deep(x, y))
+            aa.len() == ba.len()
+                && aa
+                    .iter()
+                    .zip(ba.iter())
+                    .all(|(x, y)| values_equal_deep(x, y))
         }
         (Value::Object(ao), Value::Object(bo)) => {
             ao.len() == bo.len()
-                && ao.iter().all(|(k, v)| bo.get(k).map_or(false, |bv| values_equal_deep(v, bv)))
+                && ao
+                    .iter()
+                    .all(|(k, v)| bo.get(k).is_some_and(|bv| values_equal_deep(v, bv)))
         }
         _ => false,
     }
@@ -266,8 +271,14 @@ mod tests {
         assert_eq!(evaluator.number_convert(&json!(1.5)), Some(1.5));
         assert_eq!(evaluator.number_convert(&json!(2.0)), Some(2.0));
         assert_eq!(evaluator.number_convert(&json!(3.0)), Some(3.0));
-        assert_eq!(evaluator.number_convert(&json!(2147483647)), Some(2147483647.0));
-        assert_eq!(evaluator.number_convert(&json!(-2147483647)), Some(-2147483647.0));
+        assert_eq!(
+            evaluator.number_convert(&json!(2147483647)),
+            Some(2147483647.0)
+        );
+        assert_eq!(
+            evaluator.number_convert(&json!(-2147483647)),
+            Some(-2147483647.0)
+        );
     }
 
     #[test]
@@ -292,27 +303,45 @@ mod tests {
     #[test]
     fn test_string_convert_booleans() {
         let evaluator = make_evaluator();
-        assert_eq!(evaluator.string_convert(&json!(true)), Some("true".to_string()));
-        assert_eq!(evaluator.string_convert(&json!(false)), Some("false".to_string()));
+        assert_eq!(
+            evaluator.string_convert(&json!(true)),
+            Some("true".to_string())
+        );
+        assert_eq!(
+            evaluator.string_convert(&json!(false)),
+            Some("false".to_string())
+        );
     }
 
     #[test]
     fn test_string_convert_strings() {
         let evaluator = make_evaluator();
         assert_eq!(evaluator.string_convert(&json!("")), Some("".to_string()));
-        assert_eq!(evaluator.string_convert(&json!("abc")), Some("abc".to_string()));
+        assert_eq!(
+            evaluator.string_convert(&json!("abc")),
+            Some("abc".to_string())
+        );
     }
 
     #[test]
     fn test_string_convert_numbers() {
         let evaluator = make_evaluator();
-        assert_eq!(evaluator.string_convert(&json!(-1.0)), Some("-1".to_string()));
+        assert_eq!(
+            evaluator.string_convert(&json!(-1.0)),
+            Some("-1".to_string())
+        );
         assert_eq!(evaluator.string_convert(&json!(0.0)), Some("0".to_string()));
         assert_eq!(evaluator.string_convert(&json!(1.0)), Some("1".to_string()));
         assert_eq!(evaluator.string_convert(&json!(2.0)), Some("2".to_string()));
         assert_eq!(evaluator.string_convert(&json!(3.0)), Some("3".to_string()));
-        assert_eq!(evaluator.string_convert(&json!(2147483647.0)), Some("2147483647".to_string()));
-        assert_eq!(evaluator.string_convert(&json!(-2147483647.0)), Some("-2147483647".to_string()));
+        assert_eq!(
+            evaluator.string_convert(&json!(2147483647.0)),
+            Some("2147483647".to_string())
+        );
+        assert_eq!(
+            evaluator.string_convert(&json!(-2147483647.0)),
+            Some("-2147483647".to_string())
+        );
     }
 
     #[test]
@@ -396,7 +425,10 @@ mod tests {
     fn test_compare_objects() {
         let evaluator = make_evaluator();
         assert_eq!(evaluator.compare(&json!({}), &json!({})), Some(0));
-        assert_eq!(evaluator.compare(&json!({"a": 1}), &json!({"a": 1})), Some(0));
+        assert_eq!(
+            evaluator.compare(&json!({"a": 1}), &json!({"a": 1})),
+            Some(0)
+        );
         assert_eq!(evaluator.compare(&json!({"a": 1}), &json!({"b": 2})), None);
         assert_eq!(evaluator.compare(&json!({}), &json!([])), None);
     }
@@ -502,8 +534,14 @@ mod tests {
 
     #[test]
     fn test_values_equal_deep_objects() {
-        assert!(values_equal_deep(&json!({"a": 1, "b": 2}), &json!({"a": 1, "b": 2})));
-        assert!(values_equal_deep(&json!({"a": 1, "b": 2}), &json!({"b": 2, "a": 1})));
+        assert!(values_equal_deep(
+            &json!({"a": 1, "b": 2}),
+            &json!({"a": 1, "b": 2})
+        ));
+        assert!(values_equal_deep(
+            &json!({"a": 1, "b": 2}),
+            &json!({"b": 2, "a": 1})
+        ));
         assert!(!values_equal_deep(&json!({"a": 1}), &json!({"b": 2})));
         assert!(!values_equal_deep(&json!({}), &json!({"a": 1})));
         assert!(!values_equal_deep(&json!({"a": 1}), &json!({})));
