@@ -122,6 +122,13 @@ pub fn eq_op(evaluator: &Evaluator, args: &Value) -> Value {
 
         let lhs = evaluator.evaluate(&arr[0]);
         let rhs = evaluator.evaluate(&arr[1]);
+
+        // A null operand short-circuits to null (canonical: eq does not treat
+        // null == null as a match), matching the other SDKs and the collector.
+        if lhs.is_null() || rhs.is_null() {
+            return Value::Null;
+        }
+
         let result = evaluator.compare(&lhs, &rhs);
 
         Value::Bool(result == Some(0))
@@ -399,13 +406,14 @@ mod tests {
     #[test]
     fn test_eq_op_null() {
         let evaluator = make_evaluator();
+        // A null operand short-circuits to null (canonical behavior).
         assert_eq!(
             eq_op(&evaluator, &json!([{"value": null}, {"value": null}])),
-            json!(true)
+            json!(null)
         );
         assert_eq!(
             eq_op(&evaluator, &json!([{"value": null}, {"value": 0}])),
-            json!(false)
+            json!(null)
         );
     }
 
