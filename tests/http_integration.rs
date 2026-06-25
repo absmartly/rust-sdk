@@ -221,12 +221,27 @@ async fn real_http_get_and_put_against_local_server() {
     let (put_path, _) = put.path.split_once('?').unwrap_or((put.path.as_str(), ""));
     assert_eq!(put_path, "/context", "PUT path should be /context");
 
-    // The rust SDK sends X-API-Key + Content-Type (+ User-Agent for the agent)
-    // on the publish request. Assert exactly the headers it does send.
+    // The publish request must carry the full canonical header set, matching the
+    // collector contract and the other SDKs.
     assert_eq!(
         put.header("X-API-Key"),
         Some(api_key),
         "PUT must carry the X-API-Key header"
+    );
+    assert_eq!(
+        put.header("X-Application"),
+        Some(application),
+        "PUT must carry the X-Application header"
+    );
+    assert_eq!(
+        put.header("X-Environment"),
+        Some(environment),
+        "PUT must carry the X-Environment header"
+    );
+    assert_eq!(
+        put.header("X-Application-Version"),
+        Some("0"),
+        "PUT must carry X-Application-Version: 0"
     );
     assert_eq!(
         put.header("Content-Type"),
@@ -234,9 +249,9 @@ async fn real_http_get_and_put_against_local_server() {
         "PUT must declare Content-Type: application/json"
     );
     let agent = put
-        .header("User-Agent")
-        .expect("PUT must carry a User-Agent (the configured agent)");
-    assert!(!agent.is_empty(), "User-Agent must be non-empty");
+        .header("X-Agent")
+        .expect("PUT must carry an X-Agent (the configured agent)");
+    assert!(!agent.is_empty(), "X-Agent must be non-empty");
 
     // Body JSON fields required by the wire contract.
     let body: serde_json::Value =

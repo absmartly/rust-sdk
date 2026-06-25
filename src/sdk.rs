@@ -341,10 +341,13 @@ impl ABsmartly {
             .client
             .put(&url)
             .header("X-API-Key", &self.config.api_key)
+            .header("X-Application", &self.config.application)
+            .header("X-Environment", &self.config.environment)
+            .header("X-Application-Version", "0")
             .header("Content-Type", "application/json")
             .json(params);
         if let Some(ref agent) = self.config.agent {
-            request = request.header("User-Agent", agent);
+            request = request.header("User-Agent", agent).header("X-Agent", agent);
         }
         let response = request.send().await?;
 
