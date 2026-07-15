@@ -9,6 +9,17 @@ where
     Ok(opt.unwrap_or_default())
 }
 
+/// The backend serializes seed fields as signed 32-bit integers (their raw
+/// two's-complement bit pattern), so values are frequently negative. Decode as
+/// i32 and reinterpret the bits as u32 rather than rejecting negative values.
+fn deserialize_seed<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = i32::deserialize(deserializer)?;
+    Ok(v as u32)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextData {
@@ -29,9 +40,9 @@ pub struct ExperimentData {
     pub full_on_variant: i64,
     #[serde(default)]
     pub traffic_split: Vec<f64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_seed")]
     pub traffic_seed_hi: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_seed")]
     pub traffic_seed_lo: u32,
     #[serde(default, deserialize_with = "deserialize_null_string")]
     pub audience: String,
@@ -39,9 +50,9 @@ pub struct ExperimentData {
     pub audience_strict: bool,
     #[serde(default)]
     pub split: Vec<f64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_seed")]
     pub seed_hi: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_seed")]
     pub seed_lo: u32,
     #[serde(default)]
     pub variants: Vec<Variant>,
