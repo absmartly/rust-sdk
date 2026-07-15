@@ -1,4 +1,5 @@
-use regex::Regex;
+use log::error;
+use regex::RegexBuilder;
 use serde_json::Value;
 
 use super::evaluator::{values_equal_deep, Evaluator};
@@ -53,14 +54,20 @@ pub fn not_op(evaluator: &Evaluator, args: &Value) -> Value {
     Value::Bool(!evaluator.boolean_convert(&result))
 }
 
-pub fn in_op(evaluator: &Evaluator, args: &Value) -> Value {
+/// CONTAINS operator (also registered under the legacy alias "in").
+///
+/// Operand order is haystack-first: `[haystack, needle]` — i.e. "does the
+/// haystack (arg 0) contain the needle (arg 1)". This matches the collector
+/// and the other ABsmartly SDKs. The "in" key is a historical alias kept for
+/// backwards compatibility with audiences already in production.
+pub fn contains_op(evaluator: &Evaluator, args: &Value) -> Value {
     if let Value::Array(arr) = args {
         if arr.len() != 2 {
             return Value::Bool(false);
         }
 
-        let needle = evaluator.evaluate(&arr[0]);
-        let haystack = evaluator.evaluate(&arr[1]);
+        let haystack = evaluator.evaluate(&arr[0]);
+        let needle = evaluator.evaluate(&arr[1]);
 
         match (&needle, &haystack) {
             (Value::String(n), Value::String(h)) => Value::Bool(h.contains(n.as_str())),
@@ -88,11 +95,20 @@ pub fn match_op(evaluator: &Evaluator, args: &Value) -> Value {
             evaluator.string_convert(&text),
             evaluator.string_convert(&pattern),
         ) {
-            if let Ok(regex) = Regex::new(&pattern_str) {
-                return Value::Bool(regex.is_match(&text_str));
+            match RegexBuilder::new(&pattern_str)
+                .size_limit(100_000)
+                .dfa_size_limit(1_000_000)
+                .build()
+            {
+                Ok(regex) => Value::Bool(regex.is_match(&text_str)),
+                Err(e) => {
+                    error!("Invalid regex pattern '{}': {}", pattern_str, e);
+                    Value::Null
+                }
             }
+        } else {
+            Value::Bool(false)
         }
-        Value::Bool(false)
     } else {
         Value::Bool(false)
     }
@@ -106,6 +122,13 @@ pub fn eq_op(evaluator: &Evaluator, args: &Value) -> Value {
 
         let lhs = evaluator.evaluate(&arr[0]);
         let rhs = evaluator.evaluate(&arr[1]);
+
+        // A null operand short-circuits to null (canonical: eq does not treat
+        // null == null as a match), matching the other SDKs and the collector.
+        if lhs.is_null() || rhs.is_null() {
+            return Value::Null;
+        }
+
         let result = evaluator.compare(&lhs, &rhs);
 
         Value::Bool(result == Some(0))
@@ -124,7 +147,7 @@ pub fn gt_op(evaluator: &Evaluator, args: &Value) -> Value {
         let rhs = evaluator.evaluate(&arr[1]);
         let result = evaluator.compare(&lhs, &rhs);
 
-        Value::Bool(result.map_or(false, |r| r > 0))
+        Value::Bool(result.is_some_and(|r| r > 0))
     } else {
         Value::Bool(false)
     }
@@ -140,7 +163,7 @@ pub fn gte_op(evaluator: &Evaluator, args: &Value) -> Value {
         let rhs = evaluator.evaluate(&arr[1]);
         let result = evaluator.compare(&lhs, &rhs);
 
-        Value::Bool(result.map_or(false, |r| r >= 0))
+        Value::Bool(result.is_some_and(|r| r >= 0))
     } else {
         Value::Bool(false)
     }
@@ -156,7 +179,7 @@ pub fn lt_op(evaluator: &Evaluator, args: &Value) -> Value {
         let rhs = evaluator.evaluate(&arr[1]);
         let result = evaluator.compare(&lhs, &rhs);
 
-        Value::Bool(result.map_or(false, |r| r < 0))
+        Value::Bool(result.is_some_and(|r| r < 0))
     } else {
         Value::Bool(false)
     }
@@ -172,7 +195,7 @@ pub fn lte_op(evaluator: &Evaluator, args: &Value) -> Value {
         let rhs = evaluator.evaluate(&arr[1]);
         let result = evaluator.compare(&lhs, &rhs);
 
-        Value::Bool(result.map_or(false, |r| r <= 0))
+        Value::Bool(result.is_some_and(|r| r <= 0))
     } else {
         Value::Bool(false)
     }
@@ -197,17 +220,35 @@ mod tests {
     fn test_and_all_true() {
         let evaluator = make_evaluator();
         assert_eq!(and_op(&evaluator, &json!([{"value": true}])), json!(true));
-        assert_eq!(and_op(&evaluator, &json!([{"value": true}, {"value": true}])), json!(true));
-        assert_eq!(and_op(&evaluator, &json!([{"value": true}, {"value": true}, {"value": true}])), json!(true));
+        assert_eq!(
+            and_op(&evaluator, &json!([{"value": true}, {"value": true}])),
+            json!(true)
+        );
+        assert_eq!(
+            and_op(
+                &evaluator,
+                &json!([{"value": true}, {"value": true}, {"value": true}])
+            ),
+            json!(true)
+        );
     }
 
     #[test]
     fn test_and_any_false() {
         let evaluator = make_evaluator();
         assert_eq!(and_op(&evaluator, &json!([{"value": false}])), json!(false));
-        assert_eq!(and_op(&evaluator, &json!([{"value": true}, {"value": false}])), json!(false));
-        assert_eq!(and_op(&evaluator, &json!([{"value": false}, {"value": true}])), json!(false));
-        assert_eq!(and_op(&evaluator, &json!([{"value": false}, {"value": false}])), json!(false));
+        assert_eq!(
+            and_op(&evaluator, &json!([{"value": true}, {"value": false}])),
+            json!(false)
+        );
+        assert_eq!(
+            and_op(&evaluator, &json!([{"value": false}, {"value": true}])),
+            json!(false)
+        );
+        assert_eq!(
+            and_op(&evaluator, &json!([{"value": false}, {"value": false}])),
+            json!(false)
+        );
     }
 
     #[test]
@@ -220,17 +261,35 @@ mod tests {
     fn test_or_any_true() {
         let evaluator = make_evaluator();
         assert_eq!(or_op(&evaluator, &json!([{"value": true}])), json!(true));
-        assert_eq!(or_op(&evaluator, &json!([{"value": true}, {"value": true}])), json!(true));
-        assert_eq!(or_op(&evaluator, &json!([{"value": true}, {"value": false}])), json!(true));
-        assert_eq!(or_op(&evaluator, &json!([{"value": false}, {"value": true}])), json!(true));
+        assert_eq!(
+            or_op(&evaluator, &json!([{"value": true}, {"value": true}])),
+            json!(true)
+        );
+        assert_eq!(
+            or_op(&evaluator, &json!([{"value": true}, {"value": false}])),
+            json!(true)
+        );
+        assert_eq!(
+            or_op(&evaluator, &json!([{"value": false}, {"value": true}])),
+            json!(true)
+        );
     }
 
     #[test]
     fn test_or_all_false() {
         let evaluator = make_evaluator();
         assert_eq!(or_op(&evaluator, &json!([{"value": false}])), json!(false));
-        assert_eq!(or_op(&evaluator, &json!([{"value": false}, {"value": false}])), json!(false));
-        assert_eq!(or_op(&evaluator, &json!([{"value": false}, {"value": false}, {"value": false}])), json!(false));
+        assert_eq!(
+            or_op(&evaluator, &json!([{"value": false}, {"value": false}])),
+            json!(false)
+        );
+        assert_eq!(
+            or_op(
+                &evaluator,
+                &json!([{"value": false}, {"value": false}, {"value": false}])
+            ),
+            json!(false)
+        );
     }
 
     #[test]
@@ -275,137 +334,393 @@ mod tests {
         assert_eq!(not_op(&evaluator, &json!({"value": 1})), json!(false));
         assert_eq!(not_op(&evaluator, &json!({"value": 0})), json!(true));
         assert_eq!(not_op(&evaluator, &json!({"value": null})), json!(true));
-        assert_eq!(not_op(&evaluator, &json!({"var": "returning"})), json!(false));
+        assert_eq!(
+            not_op(&evaluator, &json!({"var": "returning"})),
+            json!(false)
+        );
     }
 
     #[test]
     fn test_eq_op_numbers() {
         let evaluator = make_evaluator();
-        assert_eq!(eq_op(&evaluator, &json!([{"value": 0}, {"value": 0}])), json!(true));
-        assert_eq!(eq_op(&evaluator, &json!([{"value": 1}, {"value": 1}])), json!(true));
-        assert_eq!(eq_op(&evaluator, &json!([{"value": 0}, {"value": 1}])), json!(false));
-        assert_eq!(eq_op(&evaluator, &json!([{"var": "age"}, {"value": 25}])), json!(true));
-        assert_eq!(eq_op(&evaluator, &json!([{"var": "age"}, {"value": 30}])), json!(false));
+        assert_eq!(
+            eq_op(&evaluator, &json!([{"value": 0}, {"value": 0}])),
+            json!(true)
+        );
+        assert_eq!(
+            eq_op(&evaluator, &json!([{"value": 1}, {"value": 1}])),
+            json!(true)
+        );
+        assert_eq!(
+            eq_op(&evaluator, &json!([{"value": 0}, {"value": 1}])),
+            json!(false)
+        );
+        assert_eq!(
+            eq_op(&evaluator, &json!([{"var": "age"}, {"value": 25}])),
+            json!(true)
+        );
+        assert_eq!(
+            eq_op(&evaluator, &json!([{"var": "age"}, {"value": 30}])),
+            json!(false)
+        );
     }
 
     #[test]
     fn test_eq_op_strings() {
         let evaluator = make_evaluator();
-        assert_eq!(eq_op(&evaluator, &json!([{"value": ""}, {"value": ""}])), json!(true));
-        assert_eq!(eq_op(&evaluator, &json!([{"value": "abc"}, {"value": "abc"}])), json!(true));
-        assert_eq!(eq_op(&evaluator, &json!([{"value": "abc"}, {"value": "def"}])), json!(false));
-        assert_eq!(eq_op(&evaluator, &json!([{"var": "name"}, {"value": "John"}])), json!(true));
+        assert_eq!(
+            eq_op(&evaluator, &json!([{"value": ""}, {"value": ""}])),
+            json!(true)
+        );
+        assert_eq!(
+            eq_op(&evaluator, &json!([{"value": "abc"}, {"value": "abc"}])),
+            json!(true)
+        );
+        assert_eq!(
+            eq_op(&evaluator, &json!([{"value": "abc"}, {"value": "def"}])),
+            json!(false)
+        );
+        assert_eq!(
+            eq_op(&evaluator, &json!([{"var": "name"}, {"value": "John"}])),
+            json!(true)
+        );
     }
 
     #[test]
     fn test_eq_op_booleans() {
         let evaluator = make_evaluator();
-        assert_eq!(eq_op(&evaluator, &json!([{"value": true}, {"value": true}])), json!(true));
-        assert_eq!(eq_op(&evaluator, &json!([{"value": false}, {"value": false}])), json!(true));
-        assert_eq!(eq_op(&evaluator, &json!([{"value": true}, {"value": false}])), json!(false));
+        assert_eq!(
+            eq_op(&evaluator, &json!([{"value": true}, {"value": true}])),
+            json!(true)
+        );
+        assert_eq!(
+            eq_op(&evaluator, &json!([{"value": false}, {"value": false}])),
+            json!(true)
+        );
+        assert_eq!(
+            eq_op(&evaluator, &json!([{"value": true}, {"value": false}])),
+            json!(false)
+        );
     }
 
     #[test]
     fn test_eq_op_null() {
         let evaluator = make_evaluator();
-        assert_eq!(eq_op(&evaluator, &json!([{"value": null}, {"value": null}])), json!(true));
-        assert_eq!(eq_op(&evaluator, &json!([{"value": null}, {"value": 0}])), json!(false));
+        // A null operand short-circuits to null (canonical behavior).
+        assert_eq!(
+            eq_op(&evaluator, &json!([{"value": null}, {"value": null}])),
+            json!(null)
+        );
+        assert_eq!(
+            eq_op(&evaluator, &json!([{"value": null}, {"value": 0}])),
+            json!(null)
+        );
     }
 
     #[test]
     fn test_gt_op() {
         let evaluator = make_evaluator();
-        assert_eq!(gt_op(&evaluator, &json!([{"value": 1}, {"value": 0}])), json!(true));
-        assert_eq!(gt_op(&evaluator, &json!([{"value": 0}, {"value": 1}])), json!(false));
-        assert_eq!(gt_op(&evaluator, &json!([{"value": 1}, {"value": 1}])), json!(false));
-        assert_eq!(gt_op(&evaluator, &json!([{"var": "age"}, {"value": 20}])), json!(true));
-        assert_eq!(gt_op(&evaluator, &json!([{"var": "age"}, {"value": 25}])), json!(false));
-        assert_eq!(gt_op(&evaluator, &json!([{"var": "age"}, {"value": 30}])), json!(false));
+        assert_eq!(
+            gt_op(&evaluator, &json!([{"value": 1}, {"value": 0}])),
+            json!(true)
+        );
+        assert_eq!(
+            gt_op(&evaluator, &json!([{"value": 0}, {"value": 1}])),
+            json!(false)
+        );
+        assert_eq!(
+            gt_op(&evaluator, &json!([{"value": 1}, {"value": 1}])),
+            json!(false)
+        );
+        assert_eq!(
+            gt_op(&evaluator, &json!([{"var": "age"}, {"value": 20}])),
+            json!(true)
+        );
+        assert_eq!(
+            gt_op(&evaluator, &json!([{"var": "age"}, {"value": 25}])),
+            json!(false)
+        );
+        assert_eq!(
+            gt_op(&evaluator, &json!([{"var": "age"}, {"value": 30}])),
+            json!(false)
+        );
     }
 
     #[test]
     fn test_gt_op_strings() {
         let evaluator = make_evaluator();
-        assert_eq!(gt_op(&evaluator, &json!([{"value": "b"}, {"value": "a"}])), json!(true));
-        assert_eq!(gt_op(&evaluator, &json!([{"value": "a"}, {"value": "b"}])), json!(false));
-        assert_eq!(gt_op(&evaluator, &json!([{"value": "a"}, {"value": "a"}])), json!(false));
+        assert_eq!(
+            gt_op(&evaluator, &json!([{"value": "b"}, {"value": "a"}])),
+            json!(true)
+        );
+        assert_eq!(
+            gt_op(&evaluator, &json!([{"value": "a"}, {"value": "b"}])),
+            json!(false)
+        );
+        assert_eq!(
+            gt_op(&evaluator, &json!([{"value": "a"}, {"value": "a"}])),
+            json!(false)
+        );
     }
 
     #[test]
     fn test_gte_op() {
         let evaluator = make_evaluator();
-        assert_eq!(gte_op(&evaluator, &json!([{"value": 1}, {"value": 0}])), json!(true));
-        assert_eq!(gte_op(&evaluator, &json!([{"value": 1}, {"value": 1}])), json!(true));
-        assert_eq!(gte_op(&evaluator, &json!([{"value": 0}, {"value": 1}])), json!(false));
-        assert_eq!(gte_op(&evaluator, &json!([{"var": "age"}, {"value": 20}])), json!(true));
-        assert_eq!(gte_op(&evaluator, &json!([{"var": "age"}, {"value": 25}])), json!(true));
-        assert_eq!(gte_op(&evaluator, &json!([{"var": "age"}, {"value": 30}])), json!(false));
+        assert_eq!(
+            gte_op(&evaluator, &json!([{"value": 1}, {"value": 0}])),
+            json!(true)
+        );
+        assert_eq!(
+            gte_op(&evaluator, &json!([{"value": 1}, {"value": 1}])),
+            json!(true)
+        );
+        assert_eq!(
+            gte_op(&evaluator, &json!([{"value": 0}, {"value": 1}])),
+            json!(false)
+        );
+        assert_eq!(
+            gte_op(&evaluator, &json!([{"var": "age"}, {"value": 20}])),
+            json!(true)
+        );
+        assert_eq!(
+            gte_op(&evaluator, &json!([{"var": "age"}, {"value": 25}])),
+            json!(true)
+        );
+        assert_eq!(
+            gte_op(&evaluator, &json!([{"var": "age"}, {"value": 30}])),
+            json!(false)
+        );
     }
 
     #[test]
     fn test_lt_op() {
         let evaluator = make_evaluator();
-        assert_eq!(lt_op(&evaluator, &json!([{"value": 0}, {"value": 1}])), json!(true));
-        assert_eq!(lt_op(&evaluator, &json!([{"value": 1}, {"value": 0}])), json!(false));
-        assert_eq!(lt_op(&evaluator, &json!([{"value": 1}, {"value": 1}])), json!(false));
-        assert_eq!(lt_op(&evaluator, &json!([{"var": "age"}, {"value": 30}])), json!(true));
-        assert_eq!(lt_op(&evaluator, &json!([{"var": "age"}, {"value": 25}])), json!(false));
-        assert_eq!(lt_op(&evaluator, &json!([{"var": "age"}, {"value": 20}])), json!(false));
+        assert_eq!(
+            lt_op(&evaluator, &json!([{"value": 0}, {"value": 1}])),
+            json!(true)
+        );
+        assert_eq!(
+            lt_op(&evaluator, &json!([{"value": 1}, {"value": 0}])),
+            json!(false)
+        );
+        assert_eq!(
+            lt_op(&evaluator, &json!([{"value": 1}, {"value": 1}])),
+            json!(false)
+        );
+        assert_eq!(
+            lt_op(&evaluator, &json!([{"var": "age"}, {"value": 30}])),
+            json!(true)
+        );
+        assert_eq!(
+            lt_op(&evaluator, &json!([{"var": "age"}, {"value": 25}])),
+            json!(false)
+        );
+        assert_eq!(
+            lt_op(&evaluator, &json!([{"var": "age"}, {"value": 20}])),
+            json!(false)
+        );
     }
 
     #[test]
     fn test_lte_op() {
         let evaluator = make_evaluator();
-        assert_eq!(lte_op(&evaluator, &json!([{"value": 0}, {"value": 1}])), json!(true));
-        assert_eq!(lte_op(&evaluator, &json!([{"value": 1}, {"value": 1}])), json!(true));
-        assert_eq!(lte_op(&evaluator, &json!([{"value": 1}, {"value": 0}])), json!(false));
-        assert_eq!(lte_op(&evaluator, &json!([{"var": "age"}, {"value": 30}])), json!(true));
-        assert_eq!(lte_op(&evaluator, &json!([{"var": "age"}, {"value": 25}])), json!(true));
-        assert_eq!(lte_op(&evaluator, &json!([{"var": "age"}, {"value": 20}])), json!(false));
+        assert_eq!(
+            lte_op(&evaluator, &json!([{"value": 0}, {"value": 1}])),
+            json!(true)
+        );
+        assert_eq!(
+            lte_op(&evaluator, &json!([{"value": 1}, {"value": 1}])),
+            json!(true)
+        );
+        assert_eq!(
+            lte_op(&evaluator, &json!([{"value": 1}, {"value": 0}])),
+            json!(false)
+        );
+        assert_eq!(
+            lte_op(&evaluator, &json!([{"var": "age"}, {"value": 30}])),
+            json!(true)
+        );
+        assert_eq!(
+            lte_op(&evaluator, &json!([{"var": "age"}, {"value": 25}])),
+            json!(true)
+        );
+        assert_eq!(
+            lte_op(&evaluator, &json!([{"var": "age"}, {"value": 20}])),
+            json!(false)
+        );
     }
 
     #[test]
-    fn test_in_op_string_contains() {
+    fn test_contains_op_string_contains() {
         let evaluator = make_evaluator();
-        assert_eq!(in_op(&evaluator, &json!([{"value": "abc"}, {"value": "abcdefghijk"}])), json!(true));
-        assert_eq!(in_op(&evaluator, &json!([{"value": "def"}, {"value": "abcdefghijk"}])), json!(true));
-        assert_eq!(in_op(&evaluator, &json!([{"value": "xyz"}, {"value": "abcdefghijk"}])), json!(false));
+        // [haystack, needle]
+        assert_eq!(
+            contains_op(
+                &evaluator,
+                &json!([{"value": "abcdefghijk"}, {"value": "abc"}])
+            ),
+            json!(true)
+        );
+        assert_eq!(
+            contains_op(
+                &evaluator,
+                &json!([{"value": "abcdefghijk"}, {"value": "def"}])
+            ),
+            json!(true)
+        );
+        assert_eq!(
+            contains_op(
+                &evaluator,
+                &json!([{"value": "abcdefghijk"}, {"value": "xyz"}])
+            ),
+            json!(false)
+        );
     }
 
     #[test]
-    fn test_in_op_array_contains() {
+    fn test_contains_op_array_contains() {
         let evaluator = make_evaluator();
-        assert_eq!(in_op(&evaluator, &json!([{"value": 1}, {"value": [1, 2, 3]}])), json!(true));
-        assert_eq!(in_op(&evaluator, &json!([{"value": 2}, {"value": [1, 2, 3]}])), json!(true));
-        assert_eq!(in_op(&evaluator, &json!([{"value": 4}, {"value": [1, 2, 3]}])), json!(false));
-        assert_eq!(in_op(&evaluator, &json!([{"value": 1}, {"value": []}])), json!(false));
+        // [haystack, needle]
+        assert_eq!(
+            contains_op(&evaluator, &json!([{"value": [1, 2, 3]}, {"value": 1}])),
+            json!(true)
+        );
+        assert_eq!(
+            contains_op(&evaluator, &json!([{"value": [1, 2, 3]}, {"value": 2}])),
+            json!(true)
+        );
+        assert_eq!(
+            contains_op(&evaluator, &json!([{"value": [1, 2, 3]}, {"value": 4}])),
+            json!(false)
+        );
+        assert_eq!(
+            contains_op(&evaluator, &json!([{"value": []}, {"value": 1}])),
+            json!(false)
+        );
     }
 
     #[test]
-    fn test_in_op_object_contains_key() {
+    fn test_contains_op_object_contains_key() {
         let evaluator = make_evaluator();
-        assert_eq!(in_op(&evaluator, &json!([{"value": "a"}, {"value": {"a": 1, "b": 2}}])), json!(true));
-        assert_eq!(in_op(&evaluator, &json!([{"value": "b"}, {"value": {"a": 1, "b": 2}}])), json!(true));
-        assert_eq!(in_op(&evaluator, &json!([{"value": "c"}, {"value": {"a": 1, "b": 2}}])), json!(false));
+        // [haystack, needle]
+        assert_eq!(
+            contains_op(
+                &evaluator,
+                &json!([{"value": {"a": 1, "b": 2}}, {"value": "a"}])
+            ),
+            json!(true)
+        );
+        assert_eq!(
+            contains_op(
+                &evaluator,
+                &json!([{"value": {"a": 1, "b": 2}}, {"value": "b"}])
+            ),
+            json!(true)
+        );
+        assert_eq!(
+            contains_op(
+                &evaluator,
+                &json!([{"value": {"a": 1, "b": 2}}, {"value": "c"}])
+            ),
+            json!(false)
+        );
     }
 
     #[test]
     fn test_match_op() {
         let evaluator = make_evaluator();
-        assert_eq!(match_op(&evaluator, &json!([{"value": "abcdefghijk"}, {"value": ""}])), json!(true));
-        assert_eq!(match_op(&evaluator, &json!([{"value": "abcdefghijk"}, {"value": "abc"}])), json!(true));
-        assert_eq!(match_op(&evaluator, &json!([{"value": "abcdefghijk"}, {"value": "ijk"}])), json!(true));
-        assert_eq!(match_op(&evaluator, &json!([{"value": "abcdefghijk"}, {"value": "^abc"}])), json!(true));
-        assert_eq!(match_op(&evaluator, &json!([{"value": "abcdefghijk"}, {"value": "ijk$"}])), json!(true));
-        assert_eq!(match_op(&evaluator, &json!([{"value": "abcdefghijk"}, {"value": "def"}])), json!(true));
-        assert_eq!(match_op(&evaluator, &json!([{"value": "abcdefghijk"}, {"value": "b.*j"}])), json!(true));
-        assert_eq!(match_op(&evaluator, &json!([{"value": "abcdefghijk"}, {"value": "xyz"}])), json!(false));
+        assert_eq!(
+            match_op(
+                &evaluator,
+                &json!([{"value": "abcdefghijk"}, {"value": ""}])
+            ),
+            json!(true)
+        );
+        assert_eq!(
+            match_op(
+                &evaluator,
+                &json!([{"value": "abcdefghijk"}, {"value": "abc"}])
+            ),
+            json!(true)
+        );
+        assert_eq!(
+            match_op(
+                &evaluator,
+                &json!([{"value": "abcdefghijk"}, {"value": "ijk"}])
+            ),
+            json!(true)
+        );
+        assert_eq!(
+            match_op(
+                &evaluator,
+                &json!([{"value": "abcdefghijk"}, {"value": "^abc"}])
+            ),
+            json!(true)
+        );
+        assert_eq!(
+            match_op(
+                &evaluator,
+                &json!([{"value": "abcdefghijk"}, {"value": "ijk$"}])
+            ),
+            json!(true)
+        );
+        assert_eq!(
+            match_op(
+                &evaluator,
+                &json!([{"value": "abcdefghijk"}, {"value": "def"}])
+            ),
+            json!(true)
+        );
+        assert_eq!(
+            match_op(
+                &evaluator,
+                &json!([{"value": "abcdefghijk"}, {"value": "b.*j"}])
+            ),
+            json!(true)
+        );
+        assert_eq!(
+            match_op(
+                &evaluator,
+                &json!([{"value": "abcdefghijk"}, {"value": "xyz"}])
+            ),
+            json!(false)
+        );
     }
 
     #[test]
     fn test_match_op_with_null() {
         let evaluator = make_evaluator();
-        assert_eq!(match_op(&evaluator, &json!([{"value": null}, {"value": "abc"}])), json!(false));
-        assert_eq!(match_op(&evaluator, &json!([{"value": "abcdefghijk"}, {"value": null}])), json!(false));
+        assert_eq!(
+            match_op(&evaluator, &json!([{"value": null}, {"value": "abc"}])),
+            json!(false)
+        );
+        assert_eq!(
+            match_op(
+                &evaluator,
+                &json!([{"value": "abcdefghijk"}, {"value": null}])
+            ),
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn test_match_op_larger_pattern() {
+        let evaluator = make_evaluator();
+        let long_alternation: String = (0..200)
+            .map(|i| format!("option{}", i))
+            .collect::<Vec<_>>()
+            .join("|");
+        let result = match_op(
+            &evaluator,
+            &json!([{"value": "option150"}, {"value": long_alternation}]),
+        );
+        assert_eq!(result, json!(true));
+    }
+
+    #[test]
+    fn test_match_op_invalid_pattern_returns_null() {
+        let evaluator = make_evaluator();
+        let result = match_op(&evaluator, &json!([{"value": "abc"}, {"value": "("}]));
+        assert_eq!(result, Value::Null);
     }
 }

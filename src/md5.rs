@@ -34,8 +34,20 @@ mod tests {
     md5_test!(test_md5_testy1, "testy1", "8fT8xGipOhPkZ2DncKU-1A");
     md5_test!(test_md5_testy12, "testy12", "YqRAtOz000gIu61ErEH18A");
     md5_test!(test_md5_testy123, "testy123", "pfV2H07L6WvdqlY0zHuYIw");
-    md5_test!(test_md5_special_characters, "special characters a\u{00e7}b\u{2193}c", "4PIrO7lKtTxOcj2eMYlG7A");
-    md5_test!(test_md5_quick_brown_fox, "The quick brown fox jumps over the lazy dog", "nhB9nTcrtoJr2B01QqQZ1g");
-    md5_test!(test_md5_quick_brown_fox_pie, "The quick brown fox jumps over the lazy dog and eats a pie", "iM-8ECRrLUQzixl436y96A");
+    md5_test!(
+        test_md5_special_characters,
+        "special characters a\u{00e7}b\u{2193}c",
+        "4PIrO7lKtTxOcj2eMYlG7A"
+    );
+    md5_test!(
+        test_md5_quick_brown_fox,
+        "The quick brown fox jumps over the lazy dog",
+        "nhB9nTcrtoJr2B01QqQZ1g"
+    );
+    md5_test!(
+        test_md5_quick_brown_fox_pie,
+        "The quick brown fox jumps over the lazy dog and eats a pie",
+        "iM-8ECRrLUQzixl436y96A"
+    );
     md5_test!(test_md5_lorem_ipsum, "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.", "24m7XOq4f5wPzCqzbBicLA");
 }

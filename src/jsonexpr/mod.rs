@@ -12,7 +12,11 @@ impl JsonExpr {
         Self
     }
 
-    pub fn evaluate_boolean_expr(&self, expr: &Value, vars: &HashMap<String, Value>) -> Option<bool> {
+    pub fn evaluate_boolean_expr(
+        &self,
+        expr: &Value,
+        vars: &HashMap<String, Value>,
+    ) -> Option<bool> {
         let evaluator = Evaluator::new(vars.clone());
         let result = evaluator.evaluate(expr);
         Some(evaluator.boolean_convert(&result))

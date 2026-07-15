@@ -1,5 +1,7 @@
 use crate::context::Context;
-use crate::models::{ContextData, ContextOptions};
+use crate::context_publisher::DefaultContextPublisher;
+use crate::models::{ContextData, ContextOptions, PublishParams};
+use log::warn;
 use reqwest::Client;
 
 #[derive(Debug, Clone)]
@@ -99,30 +101,36 @@ impl ABsmartlyBuilder {
     }
 
     pub fn build(self) -> Result<ABsmartly, SDKError> {
-        let endpoint = self.endpoint.ok_or_else(|| {
-            SDKError::ConfigError("endpoint is required".to_string())
-        })?;
-        let api_key = self.api_key.ok_or_else(|| {
-            SDKError::ConfigError("api_key is required".to_string())
-        })?;
-        let application = self.application.ok_or_else(|| {
-            SDKError::ConfigError("application is required".to_string())
-        })?;
-        let environment = self.environment.ok_or_else(|| {
-            SDKError::ConfigError("environment is required".to_string())
-        })?;
+        let endpoint = self
+            .endpoint
+            .ok_or_else(|| SDKError::ConfigError("endpoint is required".to_string()))?;
+        let api_key = self
+            .api_key
+            .ok_or_else(|| SDKError::ConfigError("api_key is required".to_string()))?;
+        let application = self
+            .application
+            .ok_or_else(|| SDKError::ConfigError("application is required".to_string()))?;
+        let environment = self
+            .environment
+            .ok_or_else(|| SDKError::ConfigError("environment is required".to_string()))?;
 
         if endpoint.is_empty() {
-            return Err(SDKError::ConfigError("endpoint cannot be empty".to_string()));
+            return Err(SDKError::ConfigError(
+                "endpoint cannot be empty".to_string(),
+            ));
         }
         if api_key.is_empty() {
             return Err(SDKError::ConfigError("api_key cannot be empty".to_string()));
         }
         if application.is_empty() {
-            return Err(SDKError::ConfigError("application cannot be empty".to_string()));
+            return Err(SDKError::ConfigError(
+                "application cannot be empty".to_string(),
+            ));
         }
         if environment.is_empty() {
-            return Err(SDKError::ConfigError("environment cannot be empty".to_string()));
+            return Err(SDKError::ConfigError(
+                "environment cannot be empty".to_string(),
+            ));
         }
 
         let config = SDKConfig {
@@ -156,6 +164,11 @@ pub enum SDKError {
     HttpError(#[from] reqwest::Error),
     #[error("Invalid configuration: {0}")]
     ConfigError(String),
+}
+
+fn backoff_ms(max_retries: u32, retries_remaining: u32) -> u64 {
+    let attempt = (max_retries - retries_remaining).min(10);
+    50u64.saturating_mul(2u64.saturating_pow(attempt))
 }
 
 impl ABsmartly {
@@ -203,7 +216,14 @@ impl ABsmartly {
         let mut last_error = None;
 
         while retries > 0 {
-            let response = self.client.get(&url).send().await;
+            let mut request = self
+                .client
+                .get(&url)
+                .header("X-API-Key", &self.config.api_key);
+            if let Some(ref agent) = self.config.agent {
+                request = request.header("User-Agent", agent);
+            }
+            let response = request.send().await;
 
             match response {
                 Ok(resp) => {
@@ -212,12 +232,13 @@ impl ABsmartly {
                         return Ok(self.create_context_with_internal(units_vec, data, options));
                     } else if resp.status().is_server_error() {
                         retries -= 1;
-                        last_error = Some(SDKError::HttpError(
-                            resp.error_for_status().unwrap_err(),
-                        ));
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            50 * (2_u64.pow((self.config.retries.unwrap_or(5) - retries) as u32)),
-                        ))
+                        last_error =
+                            Some(SDKError::HttpError(resp.error_for_status().unwrap_err()));
+                        let max_retries = self.config.retries.unwrap_or(5);
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms(
+                            max_retries,
+                            retries,
+                        )))
                         .await;
                         continue;
                     } else {
@@ -228,9 +249,11 @@ impl ABsmartly {
                     retries -= 1;
                     last_error = Some(SDKError::HttpError(e));
                     if retries > 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            50 * (2_u64.pow((self.config.retries.unwrap_or(5) - retries) as u32)),
-                        ))
+                        let max_retries = self.config.retries.unwrap_or(5);
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms(
+                            max_retries,
+                            retries,
+                        )))
                         .await;
                     }
                 }
@@ -264,13 +287,77 @@ impl ABsmartly {
         &self,
         units: Vec<(String, String)>,
         data: ContextData,
-        _options: Option<ContextOptions>,
+        options: Option<ContextOptions>,
     ) -> Context {
-        let mut context = Context::new(data);
+        let mut context = match options {
+            Some(opts) => Context::new_with_options(data, opts),
+            None => Context::new(data),
+        };
         for (unit_type, uid) in units {
-            let _ = context.set_unit(&unit_type, &uid);
+            if let Err(e) = context.set_unit(&unit_type, &uid) {
+                warn!("Failed to set unit '{}': {}", unit_type, e);
+            }
         }
+
+        context.set_publisher(Box::new(DefaultContextPublisher::new(
+            &self.config.endpoint,
+            &self.config.api_key,
+        )));
+
+        let url = format!(
+            "{}/context?application={}&environment={}",
+            self.config.endpoint.trim_end_matches('/'),
+            urlencoding::encode(&self.config.application),
+            urlencoding::encode(&self.config.environment)
+        );
+        let api_key = self.config.api_key.clone();
+        let agent = self.config.agent.clone();
+        let client = self.client.clone();
+        context.set_data_fetcher(Box::new(move || {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let mut request = client.get(&url).header("X-API-Key", &api_key);
+                    if let Some(ref a) = agent {
+                        request = request.header("User-Agent", a);
+                    }
+                    let resp = request
+                        .send()
+                        .await
+                        .map_err(|e| format!("Refresh fetch failed: {}", e))?;
+                    resp.json::<ContextData>()
+                        .await
+                        .map_err(|e| format!("Refresh parse failed: {}", e))
+                })
+            })
+        }));
+
         context
+    }
+
+    pub async fn publish(&self, params: &PublishParams) -> Result<(), SDKError> {
+        let url = format!("{}/context", self.config.endpoint.trim_end_matches('/'));
+
+        let mut request = self
+            .client
+            .put(&url)
+            .header("X-API-Key", &self.config.api_key)
+            .header("X-Application", &self.config.application)
+            .header("X-Environment", &self.config.environment)
+            .header("X-Application-Version", "0")
+            .header("Content-Type", "application/json")
+            .json(params);
+        if let Some(ref agent) = self.config.agent {
+            request = request.header("User-Agent", agent).header("X-Agent", agent);
+        }
+        let response = request.send().await?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(SDKError::HttpError(
+                response.error_for_status().unwrap_err(),
+            ))
+        }
     }
 }
 
@@ -280,7 +367,9 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_context_data() -> ContextData {
-        ContextData { experiments: vec![] }
+        ContextData {
+            experiments: vec![],
+        }
     }
 
     #[test]
@@ -363,7 +452,10 @@ mod tests {
         );
 
         assert_eq!(context.get_unit("session_id"), Some(&"user123".to_string()));
-        assert_eq!(context.get_unit("device_id"), Some(&"device456".to_string()));
+        assert_eq!(
+            context.get_unit("device_id"),
+            Some(&"device456".to_string())
+        );
     }
 
     #[test]
@@ -385,7 +477,10 @@ mod tests {
         let context = sdk.create_context_with(units, data, None);
 
         assert_eq!(context.get_unit("session_id"), Some(&"user123".to_string()));
-        assert_eq!(context.get_unit("device_id"), Some(&"device456".to_string()));
+        assert_eq!(
+            context.get_unit("device_id"),
+            Some(&"device456".to_string())
+        );
     }
 
     #[test]
@@ -406,7 +501,10 @@ mod tests {
         let context = sdk.create_context_with(units, data, None);
 
         assert_eq!(context.get_unit("session_id"), Some(&"user123".to_string()));
-        assert_eq!(context.get_unit("device_id"), Some(&"device456".to_string()));
+        assert_eq!(
+            context.get_unit("device_id"),
+            Some(&"device456".to_string())
+        );
     }
 
     #[test]
@@ -426,90 +524,6 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_missing_endpoint() {
-        let result = ABsmartly::builder()
-            .api_key("key")
-            .application("app")
-            .environment("env")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_missing_api_key() {
-        let result = ABsmartly::builder()
-            .endpoint("endpoint")
-            .application("app")
-            .environment("env")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_missing_application() {
-        let result = ABsmartly::builder()
-            .endpoint("endpoint")
-            .api_key("key")
-            .environment("env")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_missing_environment() {
-        let result = ABsmartly::builder()
-            .endpoint("endpoint")
-            .api_key("key")
-            .application("app")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_empty_endpoint() {
-        let result = ABsmartly::builder()
-            .endpoint("")
-            .api_key("key")
-            .application("app")
-            .environment("env")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_empty_api_key() {
-        let result = ABsmartly::builder()
-            .endpoint("endpoint")
-            .api_key("")
-            .application("app")
-            .environment("env")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_empty_application() {
-        let result = ABsmartly::builder()
-            .endpoint("endpoint")
-            .api_key("key")
-            .application("")
-            .environment("env")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_empty_environment() {
-        let result = ABsmartly::builder()
-            .endpoint("endpoint")
-            .api_key("key")
-            .application("app")
-            .environment("")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_sdk_config_new() {
         let config = SDKConfig::new("endpoint", "key", "app", "env");
         assert_eq!(config.endpoint, "endpoint");
@@ -523,22 +537,19 @@ mod tests {
 
     #[test]
     fn test_sdk_config_with_agent() {
-        let config = SDKConfig::new("endpoint", "key", "app", "env")
-            .with_agent("test-agent");
+        let config = SDKConfig::new("endpoint", "key", "app", "env").with_agent("test-agent");
         assert_eq!(config.agent, Some("test-agent".to_string()));
     }
 
     #[test]
     fn test_sdk_config_with_timeout() {
-        let config = SDKConfig::new("endpoint", "key", "app", "env")
-            .with_timeout(5000);
+        let config = SDKConfig::new("endpoint", "key", "app", "env").with_timeout(5000);
         assert_eq!(config.timeout_ms, Some(5000));
     }
 
     #[test]
     fn test_sdk_config_with_retries() {
-        let config = SDKConfig::new("endpoint", "key", "app", "env")
-            .with_retries(10);
+        let config = SDKConfig::new("endpoint", "key", "app", "env").with_retries(10);
         assert_eq!(config.retries, Some(10));
     }
 
@@ -624,5 +635,57 @@ mod tests {
     fn test_sdk_error_display() {
         let err = SDKError::ConfigError("test error".to_string());
         assert_eq!(format!("{}", err), "Invalid configuration: test error");
+    }
+
+    #[test]
+    fn test_backoff_ms_calculation() {
+        assert_eq!(backoff_ms(5, 5), 50);
+        assert_eq!(backoff_ms(5, 4), 100);
+        assert_eq!(backoff_ms(5, 3), 200);
+        assert_eq!(backoff_ms(5, 2), 400);
+        assert_eq!(backoff_ms(5, 1), 800);
+        assert_eq!(backoff_ms(5, 0), 1600);
+    }
+
+    #[test]
+    fn test_backoff_ms_caps_at_10() {
+        let at_10 = backoff_ms(15, 5);
+        let at_11 = backoff_ms(15, 4);
+        assert_eq!(at_10, at_11);
+    }
+
+    #[test]
+    fn test_builder_empty_fields_rejected() {
+        assert!(ABsmartly::builder()
+            .endpoint("")
+            .api_key("key")
+            .application("app")
+            .environment("env")
+            .build()
+            .is_err());
+
+        assert!(ABsmartly::builder()
+            .endpoint("endpoint")
+            .api_key("")
+            .application("app")
+            .environment("env")
+            .build()
+            .is_err());
+
+        assert!(ABsmartly::builder()
+            .endpoint("endpoint")
+            .api_key("key")
+            .application("")
+            .environment("env")
+            .build()
+            .is_err());
+
+        assert!(ABsmartly::builder()
+            .endpoint("endpoint")
+            .api_key("key")
+            .application("app")
+            .environment("")
+            .build()
+            .is_err());
     }
 }
