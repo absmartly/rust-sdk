@@ -100,6 +100,15 @@ let units = [("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")];
 let mut context = sdk.create_context(units, None).await?;
 ```
 
+`create_context()` returns `Err` when the context data cannot be fetched. If you prefer a context in every case, use `create_context_or_failed()`. When the fetch fails, it returns a failed context: `is_failed()` is `true`, `ready_error()` holds the cause, and the event logger receives an `error` event. A failed context returns control variants and default values, and it discards its events on publish.
+
+```rust
+let context = sdk.create_context_or_failed(units, None).await;
+if let Some(error) = context.ready_error() {
+    eprintln!("ABsmartly context failed to load: {}", error);
+}
+```
+
 ### With Pre-fetched Data
 
 When doing full-stack experimentation with ABsmartly, we recommend creating a context only once on the server-side. Creating a context involves a round-trip to the ABsmartly event collector. We can avoid repeating the round-trip on the client-side by sending the server-side data embedded in the first document.
@@ -259,23 +268,29 @@ context.track("purchase", json!({
 Sometimes it is necessary to ensure all events have been published to the ABsmartly collector before proceeding. You can explicitly call the `publish()` method.
 
 ```rust
-context.publish();
+context.publish()?;
 ```
+
+`publish()` returns `Err` when the collector does not accept the events. The events then stay pending, so a later `publish()` sends them again, and the event logger receives an `error` event.
+
+On a multi-thread tokio runtime the default publisher waits for the collector's response. A current-thread runtime cannot block, so there the request is sent in the background: `publish()` returns `Ok(())` before the response arrives, and a failure is only logged. To get the result on a current-thread runtime, call `sdk.publish(&context.get_publish_params()).await` yourself.
 
 ### Finalizing
 
 The `finalize()` method will ensure all events have been published to the ABsmartly collector, like `publish()`, and will also "seal" the context, preventing any further events from being tracked.
 
 ```rust
-context.finalize();
+context.finalize()?;
 ```
+
+If the publish fails, `finalize()` returns `Err` and the context stays open with its events pending, so you can call `finalize()` again.
 
 ### Custom Event Logger
 
 You can set a custom event logger to handle SDK events. This is useful for debugging, analytics, or integrating with other systems.
 
 ```rust
-context.set_event_logger(Box::new(|ctx, event_type, data| {
+context.set_event_logger(Arc::new(|ctx, event_type, data| {
     match event_type {
         "exposure" => println!("Exposure event"),
         "goal" => println!("Goal tracked"),
@@ -286,11 +301,23 @@ context.set_event_logger(Box::new(|ctx, event_type, data| {
 }));
 ```
 
+To receive the `ready` event (or the `error` event of a failed load), give the logger in `ContextOptions` when you create the context. A logger set later with `set_event_logger()` only receives the events that come after it.
+
+```rust
+let options = ContextOptions {
+    event_logger: Some(Arc::new(|_ctx, event_type, data| {
+        println!("{}: {:?}", event_type, data);
+    })),
+    ..Default::default()
+};
+let mut context = sdk.create_context(units, Some(options)).await?;
+```
+
 **Event Types**
 
 | Event      | When                                               | Data                                   |
 | ---------- | -------------------------------------------------- | -------------------------------------- |
-| `error`    | Context receives an error                          | Error data                             |
+| `error`    | Data load, `publish()` or `refresh()` fails        | `{"message": "<error>"}`               |
 | `ready`    | Context turns ready                                | `ContextData` used to initialize       |
 | `refresh`  | `refresh()` method succeeds                        | `ContextData` used to refresh          |
 | `publish`  | `publish()` method succeeds                        | `PublishParams` sent to collector      |
@@ -367,7 +394,9 @@ async fn handler(State(state): State<AppState>) -> Html<String> {
 
     let treatment = context.treatment("exp_test_experiment");
 
-    context.finalize();
+    if let Err(e) = context.finalize() {
+        eprintln!("ABsmartly finalize failed: {}", e);
+    }
 
     if treatment == 0 {
         Html("<h1>Control Group</h1>".to_string())
@@ -399,7 +428,9 @@ async fn index(data: web::Data<AppState>) -> HttpResponse {
 
     let treatment = context.treatment("exp_test_experiment");
 
-    context.finalize();
+    if let Err(e) = context.finalize() {
+        eprintln!("ABsmartly finalize failed: {}", e);
+    }
 
     if treatment == 0 {
         HttpResponse::Ok().body("<h1>Control Group</h1>")
@@ -449,7 +480,9 @@ async fn index(sdk: &State<Arc<ABsmartly>>) -> String {
 
     let treatment = context.treatment("exp_test_experiment");
 
-    context.finalize();
+    if let Err(e) = context.finalize() {
+        eprintln!("ABsmartly finalize failed: {}", e);
+    }
 
     if treatment == 0 {
         String::from("<h1>Control Group</h1>")

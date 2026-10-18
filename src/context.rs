@@ -1,5 +1,5 @@
 use log::{error, warn};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -78,13 +78,11 @@ impl Context {
         ctx
     }
 
+    /// Create a ready context. The `event_logger` in `options` receives the
+    /// `ready` event before this returns.
     pub fn new_with_options(data: ContextData, options: ContextOptions) -> Self {
-        let mut ctx = Self::base();
-        ctx.event_logger = options.event_logger;
-        ctx.publish_delay = options.publish_delay;
-        ctx.refresh_period = options.refresh_period;
-        ctx.init(data);
-        ctx.state = ContextState::Ready;
+        let mut ctx = Self::new_loading_with_options(options);
+        ctx.become_ready(data);
         ctx
     }
 
@@ -92,23 +90,50 @@ impl Context {
         Self::base()
     }
 
+    /// Create a context that is still loading. Resolve it with
+    /// [`Context::become_ready`] or [`Context::become_failed_with_error`]; the
+    /// `event_logger` in `options` then receives the `ready` or `error` event.
+    pub fn new_loading_with_options(options: ContextOptions) -> Self {
+        let mut ctx = Self::base();
+        ctx.event_logger = options.event_logger;
+        ctx.publish_delay = options.publish_delay;
+        ctx.refresh_period = options.refresh_period;
+        ctx
+    }
+
+    /// Move a loading context to ready and emit `ready` with the data.
+    /// Does nothing if the context is not loading.
     pub fn become_ready(&mut self, data: ContextData) {
         if self.state == ContextState::Loading {
             self.init(data);
             self.state = ContextState::Ready;
+            match serde_json::to_value(&self.data) {
+                Ok(value) => self.log_event("ready", Some(value)),
+                Err(e) => {
+                    error!("Failed to serialize context data for ready: {}", e);
+                    self.log_event("ready", None);
+                }
+            }
         }
     }
 
+    /// Move a loading context to failed and emit `error` with no data.
+    /// Does nothing if the context is not loading.
     pub fn become_failed(&mut self) {
         if self.state == ContextState::Loading {
             self.state = ContextState::Failed;
+            self.log_event("error", None);
         }
     }
 
+    /// Move a loading context to failed, keep `error` for
+    /// [`Context::ready_error`], and emit `error` with `{"message": error}`.
+    /// Does nothing if the context is not loading.
     pub fn become_failed_with_error(&mut self, error: String) {
         if self.state == ContextState::Loading {
             self.state = ContextState::Failed;
-            self.failed_error = Some(error);
+            self.failed_error = Some(error.clone());
+            self.log_error(&error);
         }
     }
 
@@ -543,14 +568,23 @@ impl Context {
         self.data_fetcher = Some(fetcher);
     }
 
+    /// Fetch fresh data with the configured data fetcher and apply it.
+    /// A fetch failure is returned and also emitted as an `error` event.
     pub fn refresh(&mut self) -> Result<(), String> {
         let fetcher = self
             .data_fetcher
             .as_ref()
             .ok_or_else(|| "Cannot refresh: no data fetcher configured".to_string())?;
-        let new_data = fetcher()?;
-        self.refresh_with(new_data);
-        Ok(())
+        match fetcher() {
+            Ok(new_data) => {
+                self.refresh_with(new_data);
+                Ok(())
+            }
+            Err(e) => {
+                self.log_error(&e);
+                Err(e)
+            }
+        }
     }
 
     pub fn refresh_with(&mut self, new_data: ContextData) {
@@ -587,12 +621,38 @@ impl Context {
         }
     }
 
-    pub fn publish(&mut self) {
+    /// Send the pending exposures and goals to the publisher.
+    ///
+    /// On success the queue is cleared and `publish` is emitted. If the
+    /// publisher returns `Err`, the events stay pending (so a later `publish()`
+    /// retries them), `error` is emitted, and the error is returned.
+    ///
+    /// A failed context (data never loaded) does not publish: its queue is
+    /// discarded, as in the other SDKs.
+    pub fn publish(&mut self) -> Result<(), String> {
         if self.pending == 0 {
-            return;
+            return Ok(());
+        }
+
+        if self.is_failed() {
+            warn!(
+                "Discarding {} pending events: context failed to load",
+                self.pending
+            );
+            self.pending = 0;
+            self.exposures.clear();
+            self.goals.clear();
+            return Ok(());
         }
 
         let params = self.build_publish_params();
+
+        if let Some(publisher) = &self.publisher {
+            if let Err(e) = publisher.publish(&params) {
+                self.log_error(&e);
+                return Err(e);
+            }
+        }
 
         self.pending = 0;
         self.exposures.clear();
@@ -605,31 +665,37 @@ impl Context {
             }
         }
 
-        if let Some(publisher) = &self.publisher {
-            publisher.publish(&params);
-        }
+        Ok(())
     }
 
     pub fn get_publish_params(&mut self) -> PublishParams {
         self.build_publish_params()
     }
 
-    pub fn finalize(&mut self) {
+    /// Publish any pending events, then seal the context and emit `finalize`.
+    ///
+    /// If that publish fails, the context is not finalized: it returns to its
+    /// previous state with the events still pending, and the error is returned
+    /// so the caller can retry.
+    pub fn finalize(&mut self) -> Result<(), String> {
         if self.is_finalized() {
-            return;
+            return Ok(());
         }
 
+        let previous_state = self.state;
         self.state = ContextState::Finalizing;
 
-        if self.pending > 0 {
-            self.publish();
+        if let Err(e) = self.publish() {
+            self.state = previous_state;
+            return Err(e);
         }
 
         self.state = ContextState::Finalized;
         self.log_event("finalize", None);
+        Ok(())
     }
 
-    pub fn close(&mut self) {
+    pub fn close(&mut self) -> Result<(), String> {
         self.finalize()
     }
 
@@ -855,6 +921,10 @@ impl Context {
         if let Some(ref logger) = self.event_logger {
             logger(self, event_name, data);
         }
+    }
+
+    fn log_error(&self, message: &str) {
+        self.log_event("error", Some(json!({ "message": message })));
     }
 }
 
@@ -1132,7 +1202,7 @@ mod tests {
         context.track("click", ()).unwrap();
 
         assert_eq!(context.pending(), 2);
-        context.publish();
+        context.publish().unwrap();
         assert_eq!(context.pending(), 0);
     }
 
@@ -1141,7 +1211,7 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut context = Context::new(data);
 
-        context.finalize();
+        context.finalize().unwrap();
         assert!(context.is_finalized());
     }
 
@@ -1150,7 +1220,7 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut context = Context::new(data);
 
-        context.finalize();
+        context.finalize().unwrap();
         assert!(context.track("click", ()).is_err());
     }
 
@@ -1159,7 +1229,7 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut context = Context::new(data);
 
-        context.finalize();
+        context.finalize().unwrap();
         assert!(context.set_unit("session_id", "user123").is_err());
     }
 
@@ -1168,7 +1238,7 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut context = Context::new(data);
 
-        context.finalize();
+        context.finalize().unwrap();
         assert!(context.set_attribute("country", json!("US")).is_err());
     }
 
@@ -1476,7 +1546,7 @@ mod tests {
         ctx.set_unit("session_id", "test_user").unwrap();
 
         ctx.treatment("test_exp");
-        ctx.publish();
+        ctx.publish().unwrap();
 
         let entries = log.lock().unwrap();
         assert!(entries.iter().any(|e| e.event == "publish"));
@@ -1487,7 +1557,7 @@ mod tests {
         let data = make_context_data(vec![]);
         let (mut ctx, log) = make_logging_context(data);
 
-        ctx.finalize();
+        ctx.finalize().unwrap();
 
         let entries = log.lock().unwrap();
         assert!(entries.iter().any(|e| e.event == "finalize"));
@@ -1599,7 +1669,7 @@ mod tests {
     fn test_set_custom_assignment_throws_after_finalize() {
         let data = make_context_data(vec![]);
         let mut ctx = Context::new(data);
-        ctx.finalize();
+        ctx.finalize().unwrap();
 
         assert!(ctx.set_custom_assignment("exp1", 1).is_err());
     }
@@ -1981,7 +2051,7 @@ mod tests {
     fn test_track_throws_after_finalize() {
         let data = make_context_data(vec![]);
         let mut ctx = Context::new(data);
-        ctx.finalize();
+        ctx.finalize().unwrap();
         assert!(ctx.track("click", ()).is_err());
     }
 
@@ -1990,7 +2060,7 @@ mod tests {
         let data = make_context_data(vec![]);
         let (mut ctx, log) = make_logging_context(data);
 
-        ctx.publish();
+        ctx.publish().unwrap();
 
         let entries = log.lock().unwrap();
         assert!(!entries.iter().any(|e| e.event == "publish"));
@@ -2011,7 +2081,7 @@ mod tests {
         ctx.track("click", ()).unwrap();
         assert!(ctx.pending() > 0);
 
-        ctx.publish();
+        ctx.publish().unwrap();
         assert_eq!(ctx.pending(), 0);
     }
 
@@ -2020,7 +2090,7 @@ mod tests {
         let data = make_context_data(vec![]);
         let (mut ctx, log) = make_logging_context(data);
 
-        ctx.finalize();
+        ctx.finalize().unwrap();
 
         let entries = log.lock().unwrap();
         assert!(!entries.iter().any(|e| e.event == "publish"));
@@ -2041,7 +2111,7 @@ mod tests {
         ctx.treatment("test_exp");
         assert!(ctx.pending() > 0);
 
-        ctx.finalize();
+        ctx.finalize().unwrap();
         assert!(ctx.is_finalized());
         assert_eq!(ctx.pending(), 0);
 
@@ -2055,9 +2125,9 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut ctx = Context::new(data);
 
-        ctx.finalize();
+        ctx.finalize().unwrap();
         assert!(ctx.is_finalized());
-        ctx.finalize();
+        ctx.finalize().unwrap();
         assert!(ctx.is_finalized());
     }
 
@@ -2556,7 +2626,7 @@ mod tests {
     fn test_set_attributes_throws_after_finalize() {
         let data = make_context_data(vec![]);
         let mut ctx = Context::new(data);
-        ctx.finalize();
+        ctx.finalize().unwrap();
 
         assert!(ctx.set_attributes([("country", json!("US"))]).is_err());
     }
@@ -2565,7 +2635,7 @@ mod tests {
     fn test_set_custom_assignments_throws_after_finalize() {
         let data = make_context_data(vec![]);
         let mut ctx = Context::new(data);
-        ctx.finalize();
+        ctx.finalize().unwrap();
 
         assert!(ctx.set_custom_assignments([("exp1", 1)]).is_err());
     }
@@ -2728,10 +2798,10 @@ mod tests {
         ctx.track("click", ()).unwrap();
         assert_eq!(ctx.pending(), 2);
 
-        ctx.publish();
+        ctx.publish().unwrap();
         assert_eq!(ctx.pending(), 0);
 
-        ctx.publish();
+        ctx.publish().unwrap();
         assert_eq!(ctx.pending(), 0);
     }
 
@@ -2781,7 +2851,7 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut ctx = Context::new(data);
 
-        ctx.finalize();
+        ctx.finalize().unwrap();
         assert!(ctx.is_finalized());
 
         let result = ctx.set_override("exp_test", 2);
@@ -2794,7 +2864,7 @@ mod tests {
         let mut ctx = Context::new(data);
 
         assert!(!ctx.is_closed());
-        ctx.close();
+        ctx.close().unwrap();
         assert!(ctx.is_closed());
         assert!(ctx.is_finalized());
     }
@@ -2805,7 +2875,7 @@ mod tests {
         let mut ctx = Context::new(data);
 
         assert_eq!(ctx.is_closed(), ctx.is_finalized());
-        ctx.finalize();
+        ctx.finalize().unwrap();
         assert_eq!(ctx.is_closed(), ctx.is_finalized());
     }
 
@@ -2822,7 +2892,7 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut ctx = Context::new(data);
 
-        ctx.finalize();
+        ctx.finalize().unwrap();
         let result = ctx.set_unit("session_id", "uid");
         assert_eq!(result.unwrap_err(), "ABsmartly Context is finalized.");
     }
@@ -2847,5 +2917,240 @@ mod tests {
         ctx.set_unit("session_id", "uid1").unwrap();
         let result = ctx.set_unit("session_id", "uid2");
         assert_eq!(result.unwrap_err(), "Unit 'session_id' UID already set.");
+    }
+
+    fn logging_options() -> (ContextOptions, Arc<Mutex<Vec<LogEntry>>>) {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let log_clone = log.clone();
+        let options = ContextOptions {
+            event_logger: Some(Arc::new(move |_ctx, event, data| {
+                log_clone.lock().unwrap().push(LogEntry {
+                    event: event.to_string(),
+                    data,
+                });
+            })),
+            ..Default::default()
+        };
+        (options, log)
+    }
+
+    fn event_names(log: &Arc<Mutex<Vec<LogEntry>>>) -> Vec<String> {
+        log.lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.event.clone())
+            .collect()
+    }
+
+    /// Publisher whose next `fail_next` calls fail; counts every call.
+    struct FlakyPublisher {
+        fail_next: Arc<Mutex<usize>>,
+        calls: Arc<Mutex<usize>>,
+    }
+
+    impl ContextPublisher for FlakyPublisher {
+        fn publish(&self, _params: &PublishParams) -> Result<(), String> {
+            *self.calls.lock().unwrap() += 1;
+            let mut fail_next = self.fail_next.lock().unwrap();
+            if *fail_next > 0 {
+                *fail_next -= 1;
+                return Err("Publish failed".to_string());
+            }
+            Ok(())
+        }
+    }
+
+    fn flaky_publisher(failures: usize) -> (Box<FlakyPublisher>, Arc<Mutex<usize>>) {
+        let calls = Arc::new(Mutex::new(0));
+        let publisher = Box::new(FlakyPublisher {
+            fail_next: Arc::new(Mutex::new(failures)),
+            calls: calls.clone(),
+        });
+        (publisher, calls)
+    }
+
+    fn exposed_context(options: ContextOptions) -> Context {
+        let exp = make_experiment("test_exp", vec!["{}", "{}"], vec![0.5, 0.5]);
+        let mut ctx = Context::new_with_options(make_context_data(vec![exp]), options);
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.treatment("test_exp");
+        ctx.track("click", ()).unwrap();
+        ctx
+    }
+
+    #[test]
+    fn test_new_with_options_emits_ready_with_data() {
+        let exp = make_experiment("exp1", vec!["{}"], vec![1.0]);
+        let (options, log) = logging_options();
+        let ctx = Context::new_with_options(make_context_data(vec![exp]), options);
+
+        assert!(ctx.is_ready());
+        let entries = log.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event, "ready");
+        let data = entries[0]
+            .data
+            .as_ref()
+            .expect("ready carries context data");
+        assert_eq!(data["experiments"][0]["name"], "exp1");
+    }
+
+    #[test]
+    fn test_become_ready_emits_ready_once() {
+        let (options, log) = logging_options();
+        let mut ctx = Context::new_loading_with_options(options);
+        assert!(event_names(&log).is_empty());
+
+        ctx.become_ready(make_context_data(vec![]));
+        ctx.become_ready(make_context_data(vec![]));
+
+        assert_eq!(event_names(&log), vec!["ready"]);
+    }
+
+    #[test]
+    fn test_become_failed_with_error_emits_error_and_sets_ready_error() {
+        let (options, log) = logging_options();
+        let mut ctx = Context::new_loading_with_options(options);
+
+        ctx.become_failed_with_error("fetch failed".to_string());
+
+        assert!(ctx.is_failed());
+        assert_eq!(ctx.ready_error(), Some(&"fetch failed".to_string()));
+        let entries = log.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event, "error");
+        assert_eq!(entries[0].data, Some(json!({"message": "fetch failed"})));
+    }
+
+    #[test]
+    fn test_become_failed_emits_error_once() {
+        let (options, log) = logging_options();
+        let mut ctx = Context::new_loading_with_options(options);
+
+        ctx.become_failed();
+        ctx.become_failed();
+        ctx.become_ready(make_context_data(vec![]));
+
+        assert!(ctx.is_failed());
+        assert_eq!(event_names(&log), vec!["error"]);
+    }
+
+    #[test]
+    fn test_failed_context_discards_pending_on_publish() {
+        let (publisher, calls) = flaky_publisher(0);
+        let mut ctx = Context::new_loading();
+        ctx.set_publisher(publisher);
+        ctx.track("click", ()).unwrap();
+        ctx.become_failed_with_error("fetch failed".to_string());
+
+        assert!(ctx.publish().is_ok());
+        assert_eq!(ctx.pending(), 0);
+        assert_eq!(*calls.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_publish_failure_preserves_pending_and_emits_error() {
+        let (options, log) = logging_options();
+        let mut ctx = exposed_context(options);
+        let (publisher, calls) = flaky_publisher(1);
+        ctx.set_publisher(publisher);
+        assert_eq!(ctx.pending(), 2);
+        log.lock().unwrap().clear();
+
+        let result = ctx.publish();
+
+        assert_eq!(result, Err("Publish failed".to_string()));
+        assert_eq!(ctx.pending(), 2);
+        assert_eq!(*calls.lock().unwrap(), 1);
+        let entries = log.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event, "error");
+        assert_eq!(entries[0].data, Some(json!({"message": "Publish failed"})));
+    }
+
+    #[test]
+    fn test_publish_retry_after_failure_sends_same_events() {
+        let exp = make_experiment("test_exp", vec!["{}", "{}"], vec![0.5, 0.5]);
+        let mut ctx = Context::new(make_context_data(vec![exp]));
+        ctx.set_unit("session_id", "test_user").unwrap();
+        ctx.treatment("test_exp");
+        ctx.track("click", ()).unwrap();
+
+        let sent = Arc::new(Mutex::new(Vec::<PublishParams>::new()));
+        struct Recorder {
+            attempts: Mutex<usize>,
+            sent: Arc<Mutex<Vec<PublishParams>>>,
+        }
+        impl ContextPublisher for Recorder {
+            fn publish(&self, params: &PublishParams) -> Result<(), String> {
+                let mut attempts = self.attempts.lock().unwrap();
+                *attempts += 1;
+                if *attempts == 1 {
+                    return Err("Publish failed".to_string());
+                }
+                self.sent.lock().unwrap().push(params.clone());
+                Ok(())
+            }
+        }
+        ctx.set_publisher(Box::new(Recorder {
+            attempts: Mutex::new(0),
+            sent: sent.clone(),
+        }));
+
+        assert!(ctx.publish().is_err());
+        assert!(ctx.publish().is_ok());
+        assert_eq!(ctx.pending(), 0);
+
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].exposures.as_ref().map(Vec::len), Some(1));
+        assert_eq!(sent[0].goals.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn test_publish_success_emits_publish_and_clears_pending() {
+        let (options, log) = logging_options();
+        let mut ctx = exposed_context(options);
+        let (publisher, calls) = flaky_publisher(0);
+        ctx.set_publisher(publisher);
+        log.lock().unwrap().clear();
+
+        assert!(ctx.publish().is_ok());
+
+        assert_eq!(ctx.pending(), 0);
+        assert_eq!(*calls.lock().unwrap(), 1);
+        assert_eq!(event_names(&log), vec!["publish"]);
+    }
+
+    #[test]
+    fn test_finalize_failure_keeps_context_open_and_pending() {
+        let (options, log) = logging_options();
+        let mut ctx = exposed_context(options);
+        let (publisher, _calls) = flaky_publisher(1);
+        ctx.set_publisher(publisher);
+        log.lock().unwrap().clear();
+
+        assert_eq!(ctx.finalize(), Err("Publish failed".to_string()));
+        assert!(!ctx.is_finalized());
+        assert!(!ctx.is_finalizing());
+        assert!(ctx.is_ready());
+        assert_eq!(ctx.pending(), 2);
+        assert_eq!(event_names(&log), vec!["error"]);
+
+        assert!(ctx.finalize().is_ok());
+        assert!(ctx.is_finalized());
+        assert_eq!(ctx.pending(), 0);
+        assert_eq!(event_names(&log), vec!["error", "publish", "finalize"]);
+    }
+
+    #[test]
+    fn test_refresh_fetch_failure_emits_error() {
+        let (options, log) = logging_options();
+        let mut ctx = Context::new_with_options(make_context_data(vec![]), options);
+        ctx.set_data_fetcher(Box::new(|| Err("Refresh fetch failed: boom".to_string())));
+        log.lock().unwrap().clear();
+
+        assert_eq!(ctx.refresh(), Err("Refresh fetch failed: boom".to_string()));
+        assert_eq!(event_names(&log), vec!["error"]);
     }
 }

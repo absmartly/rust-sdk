@@ -190,6 +190,11 @@ impl ABsmartly {
             .build()
     }
 
+    /// Fetch context data and create a ready context.
+    ///
+    /// Returns `Err` when the data cannot be fetched. Use
+    /// [`ABsmartly::create_context_or_failed`] to get a failed context instead,
+    /// with the cause in [`Context::ready_error`] and an `error` event.
     pub async fn create_context<I, K, V>(
         &self,
         units: I,
@@ -200,17 +205,33 @@ impl ABsmartly {
         K: Into<String>,
         V: Into<String>,
     {
-        let units_vec: Vec<(String, String)> = units
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect();
+        let units_vec = collect_units(units);
+        let data = self.fetch_context_data().await?;
+        Ok(self.build_context(units_vec, Ok(data), options))
+    }
 
-        let url = format!(
-            "{}/context?application={}&environment={}",
-            self.config.endpoint.trim_end_matches('/'),
-            urlencoding::encode(&self.config.application),
-            urlencoding::encode(&self.config.environment)
-        );
+    /// Fetch context data and always return a context.
+    ///
+    /// When the fetch succeeds the context is ready and emits `ready`. When it
+    /// fails the context is failed: `is_failed()` is `true`, `ready_error()`
+    /// holds the cause, and the event logger receives an `error` event.
+    pub async fn create_context_or_failed<I, K, V>(
+        &self,
+        units: I,
+        options: Option<ContextOptions>,
+    ) -> Context
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let units_vec = collect_units(units);
+        let data = self.fetch_context_data().await.map_err(|e| e.to_string());
+        self.build_context(units_vec, data, options)
+    }
+
+    async fn fetch_context_data(&self) -> Result<ContextData, SDKError> {
+        let url = self.context_url();
 
         let mut retries = self.config.retries.unwrap_or(5);
         let mut last_error = None;
@@ -228,8 +249,7 @@ impl ABsmartly {
             match response {
                 Ok(resp) => {
                     if resp.status().is_success() {
-                        let data: ContextData = resp.json().await?;
-                        return Ok(self.create_context_with_internal(units_vec, data, options));
+                        return Ok(resp.json().await?);
                     } else if resp.status().is_server_error() {
                         retries -= 1;
                         last_error =
@@ -265,6 +285,15 @@ impl ABsmartly {
         }))
     }
 
+    fn context_url(&self) -> String {
+        format!(
+            "{}/context?application={}&environment={}",
+            self.config.endpoint.trim_end_matches('/'),
+            urlencoding::encode(&self.config.application),
+            urlencoding::encode(&self.config.environment)
+        )
+    }
+
     pub fn create_context_with<I, K, V>(
         &self,
         units: I,
@@ -276,40 +305,28 @@ impl ABsmartly {
         K: Into<String>,
         V: Into<String>,
     {
-        let units_vec: Vec<(String, String)> = units
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect();
-        self.create_context_with_internal(units_vec, data, options)
+        self.build_context(collect_units(units), Ok(data), options)
     }
 
-    fn create_context_with_internal(
+    fn build_context(
         &self,
         units: Vec<(String, String)>,
-        data: ContextData,
+        data: Result<ContextData, String>,
         options: Option<ContextOptions>,
     ) -> Context {
-        let mut context = match options {
-            Some(opts) => Context::new_with_options(data, opts),
-            None => Context::new(data),
-        };
+        let mut context = Context::new_loading_with_options(options.unwrap_or_default());
         for (unit_type, uid) in units {
             if let Err(e) = context.set_unit(&unit_type, &uid) {
                 warn!("Failed to set unit '{}': {}", unit_type, e);
             }
         }
 
-        context.set_publisher(Box::new(DefaultContextPublisher::new(
-            &self.config.endpoint,
-            &self.config.api_key,
+        context.set_publisher(Box::new(DefaultContextPublisher::from_config(
+            self.config.clone(),
+            self.client.clone(),
         )));
 
-        let url = format!(
-            "{}/context?application={}&environment={}",
-            self.config.endpoint.trim_end_matches('/'),
-            urlencoding::encode(&self.config.application),
-            urlencoding::encode(&self.config.environment)
-        );
+        let url = self.context_url();
         let api_key = self.config.api_key.clone();
         let agent = self.config.agent.clone();
         let client = self.client.clone();
@@ -331,33 +348,66 @@ impl ABsmartly {
             })
         }));
 
+        // Resolve last, so the `ready`/`error` event reaches the logger only
+        // after units, publisher and fetcher are in place.
+        match data {
+            Ok(data) => context.become_ready(data),
+            Err(error) => context.become_failed_with_error(error),
+        }
+
         context
     }
 
     pub async fn publish(&self, params: &PublishParams) -> Result<(), SDKError> {
-        let url = format!("{}/context", self.config.endpoint.trim_end_matches('/'));
+        send_publish(&self.client, &self.config, params).await
+    }
+}
 
-        let mut request = self
-            .client
-            .put(&url)
-            .header("X-API-Key", &self.config.api_key)
-            .header("X-Application", &self.config.application)
-            .header("X-Environment", &self.config.environment)
-            .header("X-Application-Version", "0")
-            .header("Content-Type", "application/json")
-            .json(params);
-        if let Some(ref agent) = self.config.agent {
-            request = request.header("User-Agent", agent).header("X-Agent", agent);
-        }
-        let response = request.send().await?;
+fn collect_units<I, K, V>(units: I) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    units
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect()
+}
 
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(SDKError::HttpError(
-                response.error_for_status().unwrap_err(),
-            ))
-        }
+/// Send `PUT {endpoint}/context` with the canonical publish headers. Shared by
+/// [`ABsmartly::publish`] and the `DefaultContextPublisher`, so both send the
+/// same request.
+pub(crate) async fn send_publish(
+    client: &Client,
+    config: &SDKConfig,
+    params: &PublishParams,
+) -> Result<(), SDKError> {
+    let url = format!("{}/context", config.endpoint.trim_end_matches('/'));
+
+    let mut request = client
+        .put(&url)
+        .header("X-API-Key", &config.api_key)
+        .header("X-Application-Version", "0")
+        .header("Content-Type", "application/json")
+        .json(params);
+    if !config.application.is_empty() {
+        request = request.header("X-Application", &config.application);
+    }
+    if !config.environment.is_empty() {
+        request = request.header("X-Environment", &config.environment);
+    }
+    if let Some(ref agent) = config.agent {
+        request = request.header("User-Agent", agent).header("X-Agent", agent);
+    }
+    let response = request.send().await?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(SDKError::HttpError(
+            response.error_for_status().unwrap_err(),
+        ))
     }
 }
 
