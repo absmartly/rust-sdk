@@ -323,9 +323,13 @@ impl ABsmartly {
         options: Option<ContextOptions>,
     ) -> Context {
         let mut context = Context::new_loading_with_options(options.unwrap_or_default());
+        // An invalid unit must not yield a usable context with a partial
+        // identity: the context is failed instead, with the cause attached.
+        let mut data = data;
         for (unit_type, uid) in units {
             if let Err(e) = context.set_unit(&unit_type, &uid) {
                 warn!("Failed to set unit '{}': {}", unit_type, e);
+                data = Err(format!("Invalid unit '{}': {}", unit_type, e));
             }
         }
 
@@ -337,23 +341,22 @@ impl ABsmartly {
         let url = self.context_url();
         let api_key = self.config.api_key.clone();
         let agent = self.config.agent.clone();
-        let client = self.client.clone();
+        let timeout_ms = self.config.timeout_ms.unwrap_or(3000);
         context.set_data_fetcher(Box::new(move || {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let mut request = client.get(&url).header("X-API-Key", &api_key);
-                    if let Some(ref a) = agent {
-                        request = request.header("User-Agent", a);
-                    }
-                    let resp = request
-                        .send()
-                        .await
-                        .map_err(|e| format!("Refresh fetch failed: {}", e))?;
-                    resp.json::<ContextData>()
-                        .await
-                        .map_err(|e| format!("Refresh parse failed: {}", e))
-                })
-            })
+            run_blocking(async {
+                let client = blocking_client(timeout_ms)?;
+                let mut request = client.get(&url).header("X-API-Key", &api_key);
+                if let Some(ref a) = agent {
+                    request = request.header("User-Agent", a);
+                }
+                let resp = request
+                    .send()
+                    .await
+                    .map_err(|e| format!("Refresh fetch failed: {}", e))?;
+                resp.json::<ContextData>()
+                    .await
+                    .map_err(|e| format!("Refresh parse failed: {}", e))
+            })?
         }));
 
         // Resolve last, so the `ready`/`error` event reaches the logger only
@@ -369,6 +372,38 @@ impl ABsmartly {
     pub async fn publish(&self, params: &PublishParams) -> Result<(), SDKError> {
         send_publish(&self.client, &self.config, params).await
     }
+}
+
+/// Run `fut` to completion from synchronous code on any kind of tokio runtime
+/// (current-thread, multi-thread, or none) without panicking or deadlocking.
+/// The future runs on a dedicated thread with its own runtime, so the caller's
+/// runtime is never asked to block.
+pub(crate) fn run_blocking<T, F>(fut: F) -> Result<T, String>
+where
+    T: Send,
+    F: std::future::Future<Output = T> + Send,
+{
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| format!("Failed to start runtime: {}", e))
+                    .map(|rt| rt.block_on(fut))
+            })
+            .join()
+            .map_err(|_| "Blocking task panicked".to_string())?
+    })
+}
+
+/// A client for use inside [`run_blocking`]; a client created on another
+/// runtime must not be reused because its pooled connections belong to it.
+pub(crate) fn blocking_client(timeout_ms: u64) -> Result<Client, String> {
+    Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))
 }
 
 fn collect_units<I, K, V>(units: I) -> Vec<(String, String)>

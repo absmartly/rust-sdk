@@ -330,23 +330,50 @@ async fn finalize_publish_failure_leaves_context_open() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn current_thread_runtime_publishes_in_background() {
-    let server = start_server(Plan::default()).await;
+async fn current_thread_runtime_publish_reports_result_and_never_panics() {
+    let server = start_server(Plan {
+        put: [500].into(),
+        ..Plan::default()
+    })
+    .await;
     let mut context = sdk(&server.base)
         .create_context([("session_id", "user-1")], None)
         .await
         .unwrap();
     context.treatment("exp_test");
 
-    // A current-thread runtime cannot block, so the PUT is spawned.
-    context.publish().unwrap();
-    assert_eq!(context.pending(), 0);
+    // The test server shares this single-threaded runtime, so run the
+    // synchronous calls on a blocking thread to let it answer.
+    let (context, failed, retried, refreshed) = tokio::task::spawn_blocking(move || {
+        let failed = context.publish();
+        let retried = context.publish();
+        let refreshed = context.refresh();
+        (context, failed, retried, refreshed)
+    })
+    .await
+    .unwrap();
 
-    for _ in 0..100 {
-        if !server.puts().is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert_eq!(server.puts().len(), 1);
+    // A failed delivery is reported and the events stay pending for a retry.
+    assert!(failed.is_err());
+    assert!(retried.is_ok());
+    assert_eq!(context.pending(), 0);
+    assert!(refreshed.is_ok());
+    assert_eq!(server.puts().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_unit_never_yields_a_ready_context() {
+    let server = start_server(Plan::default()).await;
+    let sdk = sdk(&server.base);
+
+    let failed = sdk
+        .create_context_or_failed([("session_id", "")], None)
+        .await;
+    assert!(failed.is_failed());
+    assert!(failed.ready_error().is_some());
+
+    assert!(sdk
+        .create_context([("session_id", "")], None)
+        .await
+        .is_err());
 }
