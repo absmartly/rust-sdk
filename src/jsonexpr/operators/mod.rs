@@ -54,12 +54,43 @@ pub fn not_op(evaluator: &Evaluator, args: &Value) -> Value {
     Value::Bool(!evaluator.boolean_convert(&result))
 }
 
-/// CONTAINS operator (also registered under the legacy alias "in").
-///
-/// Operand order is haystack-first: `[haystack, needle]` — i.e. "does the
-/// haystack (arg 0) contain the needle (arg 1)". This matches the collector
-/// and the other ABsmartly SDKs. The "in" key is a historical alias kept for
-/// backwards compatibility with audiences already in production.
+/// Legacy `in` operator. Audiences already in production use the original
+/// needle-first order `[needle, haystack]`, the cross-SDK contract is
+/// haystack-first `[haystack, needle]`. Both are accepted: haystack-first
+/// wins unless arg 0 is not an array/object while arg 1 is, in which case arg 0
+/// is the needle (the legacy order). Two strings are read haystack-first.
+pub fn in_op(evaluator: &Evaluator, args: &Value) -> Value {
+    if let Value::Array(arr) = args {
+        if arr.len() != 2 {
+            return Value::Bool(false);
+        }
+        let is_collection = |v: &Value| matches!(v, Value::Array(_) | Value::Object(_));
+        let first = evaluator.evaluate(&arr[0]);
+        let second = evaluator.evaluate(&arr[1]);
+        let (haystack, needle) = if !is_collection(&first) && is_collection(&second) {
+            (second, first)
+        } else {
+            (first, second)
+        };
+        contains_values(&haystack, &needle)
+    } else {
+        Value::Bool(false)
+    }
+}
+
+fn contains_values(haystack: &Value, needle: &Value) -> Value {
+    match (needle, haystack) {
+        (Value::String(n), Value::String(h)) => Value::Bool(h.contains(n.as_str())),
+        (_, Value::Array(h_arr)) => {
+            Value::Bool(h_arr.iter().any(|item| values_equal_deep(needle, item)))
+        }
+        (Value::String(n), Value::Object(h_map)) => Value::Bool(h_map.contains_key(n)),
+        _ => Value::Bool(false),
+    }
+}
+
+/// CONTAINS operator: operand order is haystack-first, `[haystack, needle]`,
+/// matching the collector and the other ABsmartly SDKs.
 pub fn contains_op(evaluator: &Evaluator, args: &Value) -> Value {
     if let Value::Array(arr) = args {
         if arr.len() != 2 {
@@ -69,14 +100,7 @@ pub fn contains_op(evaluator: &Evaluator, args: &Value) -> Value {
         let haystack = evaluator.evaluate(&arr[0]);
         let needle = evaluator.evaluate(&arr[1]);
 
-        match (&needle, &haystack) {
-            (Value::String(n), Value::String(h)) => Value::Bool(h.contains(n.as_str())),
-            (_, Value::Array(h_arr)) => {
-                Value::Bool(h_arr.iter().any(|item| values_equal_deep(&needle, item)))
-            }
-            (Value::String(n), Value::Object(h_map)) => Value::Bool(h_map.contains_key(n)),
-            _ => Value::Bool(false),
-        }
+        contains_values(&haystack, &needle)
     } else {
         Value::Bool(false)
     }
@@ -548,6 +572,17 @@ mod tests {
             lte_op(&evaluator, &json!([{"var": "age"}, {"value": 20}])),
             json!(false)
         );
+    }
+
+    #[test]
+    fn test_in_op_accepts_legacy_needle_first_and_haystack_first() {
+        let evaluator = Evaluator::new(HashMap::new());
+        let legacy = json!([{"value": "US"}, {"value": ["US", "CA"]}]);
+        let new = json!([{"value": ["US", "CA"]}, {"value": "US"}]);
+        let miss = json!([{"value": "FR"}, {"value": ["US", "CA"]}]);
+        assert_eq!(in_op(&evaluator, &legacy), Value::Bool(true));
+        assert_eq!(in_op(&evaluator, &new), Value::Bool(true));
+        assert_eq!(in_op(&evaluator, &miss), Value::Bool(false));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::matcher::AudienceMatcher;
 use crate::models::*;
 use crate::utils::{array_equals_shallow, hash_unit};
 
-pub type EventLogger = std::sync::Arc<dyn Fn(&Context, &str, Option<Value>) + Send + Sync>;
+pub type EventLogger = Box<dyn Fn(&Context, &str, Option<Value>) + Send + Sync>;
 
 struct Experiment {
     data: ExperimentData,
@@ -36,7 +36,7 @@ pub struct Context {
     assigners: HashMap<String, VariantAssigner>,
     hashes: HashMap<String, String>,
     audience_matcher: AudienceMatcher,
-    event_logger: Option<EventLogger>,
+    event_logger: Option<crate::models::EventLogger>,
     publish_delay: i64,
     refresh_period: i64,
     data_fetcher: Option<DataFetcher>,
@@ -142,7 +142,7 @@ impl Context {
     }
 
     pub fn set_event_logger(&mut self, logger: EventLogger) {
-        self.event_logger = Some(logger);
+        self.event_logger = Some(std::sync::Arc::from(logger));
     }
 
     pub fn set_publisher(&mut self, publisher: Box<dyn ContextPublisher>) {
@@ -580,7 +580,10 @@ impl Context {
             return Err(e);
         };
         match fetcher() {
-            Ok(new_data) => self.refresh_with(new_data),
+            Ok(new_data) => {
+                self.refresh_with(new_data);
+                Ok(())
+            }
             Err(e) => {
                 self.log_error(&e);
                 Err(e)
@@ -589,10 +592,12 @@ impl Context {
     }
 
     /// Apply `new_data`. A finalized or finalizing context is left unchanged
-    /// and an error is returned.
-    pub fn refresh_with(&mut self, new_data: ContextData) -> Result<(), String> {
+    /// and an `error` event is emitted; use [`Context::refresh`] to get the
+    /// error as a `Result`.
+    pub fn refresh_with(&mut self, new_data: ContextData) {
         if self.is_finalized() || self.is_finalizing() {
-            return Err("ABsmartly Context is finalized.".to_string());
+            self.log_error("ABsmartly Context is finalized.");
+            return;
         }
         self.init(new_data);
         let to_remove: Vec<String> = {
@@ -625,7 +630,6 @@ impl Context {
                 error!("Failed to serialize context data for refresh: {}", e);
             }
         }
-        Ok(())
     }
 
     /// Send the pending exposures and goals to the publisher.
@@ -1504,7 +1508,7 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::new()));
         let log_clone = log.clone();
         let mut ctx = Context::new(data);
-        ctx.set_event_logger(Arc::new(move |_ctx, event, data| {
+        ctx.set_event_logger(Box::new(move |_ctx, event, data| {
             log_clone.lock().unwrap().push(LogEntry {
                 event: event.to_string(),
                 data,
@@ -1524,7 +1528,7 @@ mod tests {
     fn test_refresh_after_finalize_is_rejected() {
         let mut ctx = Context::new(make_context_data(vec![]));
         ctx.finalize().unwrap();
-        assert!(ctx.refresh_with(make_context_data(vec![])).is_err());
+        ctx.refresh_with(make_context_data(vec![]));
         assert!(ctx.refresh().is_err());
     }
 

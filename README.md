@@ -8,6 +8,8 @@ A Rust SDK for [ABsmartly](https://www.absmartly.com) - A/B testing and feature 
 
 ## Compatibility
 
+**0.2.0 is a breaking release** (minor bump under 0.x semver): `ContextOptions` gained an `event_logger` field (construct it with `..Default::default()`), and `Context::refresh()` is now the fetch-based refresh (use `refresh_with(data)` to apply data you already have). `SDK::new(SDKConfig)`, `set_event_logger(Box<..>)`, the `in` operator order and `refresh_with` returning `()` are unchanged from 0.1.
+
 The ABsmartly Rust SDK is compatible with Rust 2021 edition and later. It uses async/await with [tokio](https://tokio.rs/) for network operations and provides a synchronous interface for variant assignment and goal tracking.
 
 ## Installation
@@ -16,7 +18,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-absmartly-sdk = "0.1"
+absmartly-sdk = "0.2"
 ```
 
 ## Getting Started
@@ -290,7 +292,7 @@ If the publish fails, `finalize()` returns `Err` and the context stays open with
 You can set a custom event logger to handle SDK events. This is useful for debugging, analytics, or integrating with other systems.
 
 ```rust
-context.set_event_logger(Arc::new(|ctx, event_type, data| {
+context.set_event_logger(Box::new(|ctx, event_type, data| {
     match event_type {
         "exposure" => println!("Exposure event"),
         "goal" => println!("Goal tracked"),

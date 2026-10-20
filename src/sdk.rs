@@ -239,14 +239,7 @@ impl ABsmartly {
         V: Into<String>,
     {
         let units_vec = collect_units(units);
-        // Fail fast on invalid units (blank or conflicting) instead of
-        // returning a partially initialised context.
-        let mut probe = Context::new_loading_with_options(ContextOptions::default());
-        for (unit_type, uid) in &units_vec {
-            probe.set_unit(unit_type, uid).map_err(|e| {
-                SDKError::ConfigError(format!("Invalid unit '{}': {}", unit_type, e))
-            })?;
-        }
+        validate_units(&units_vec).map_err(SDKError::ConfigError)?;
         let data = self.fetch_context_data().await?;
         Ok(self.build_context(units_vec, Ok(data), options))
     }
@@ -267,7 +260,11 @@ impl ABsmartly {
         V: Into<String>,
     {
         let units_vec = collect_units(units);
-        let data = self.fetch_context_data().await.map_err(|e| e.to_string());
+        // Invalid units are reported as such, before any network I/O.
+        let data = match validate_units(&units_vec) {
+            Err(e) => Err(e),
+            Ok(()) => self.fetch_context_data().await.map_err(|e| e.to_string()),
+        };
         self.build_context(units_vec, data, options)
     }
 
@@ -440,6 +437,17 @@ pub(crate) fn blocking_client(timeout_ms: u64) -> Result<Client, String> {
         .timeout(std::time::Duration::from_millis(timeout_ms))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))
+}
+
+/// Check units the way `Context::set_unit` does (blank or conflicting values).
+fn validate_units(units: &[(String, String)]) -> Result<(), String> {
+    let mut probe = Context::new_loading_with_options(ContextOptions::default());
+    for (unit_type, uid) in units {
+        probe
+            .set_unit(unit_type, uid)
+            .map_err(|e| format!("Invalid unit '{}': {}", unit_type, e))?;
+    }
+    Ok(())
 }
 
 fn collect_units<I, K, V>(units: I) -> Vec<(String, String)>
