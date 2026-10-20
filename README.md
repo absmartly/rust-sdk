@@ -138,7 +138,7 @@ For long-running contexts, the context can be refreshed manually with updated ex
 ```rust
 let fresh_data: ContextData = serde_json::from_str(&api_response)?;
 
-context.refresh(fresh_data);
+context.refresh_with(fresh_data);
 ```
 
 ### Setting Extra Units

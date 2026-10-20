@@ -206,6 +206,14 @@ impl ABsmartly {
         V: Into<String>,
     {
         let units_vec = collect_units(units);
+        // Fail fast on invalid units (blank or conflicting) instead of
+        // returning a partially initialised context.
+        let mut probe = Context::new_loading_with_options(ContextOptions::default());
+        for (unit_type, uid) in &units_vec {
+            probe.set_unit(unit_type, uid).map_err(|e| {
+                SDKError::ConfigError(format!("Invalid unit '{}': {}", unit_type, e))
+            })?;
+        }
         let data = self.fetch_context_data().await?;
         Ok(self.build_context(units_vec, Ok(data), options))
     }
