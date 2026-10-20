@@ -377,3 +377,27 @@ async fn invalid_unit_never_yields_a_ready_context() {
         .await
         .is_err());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refresh_rejects_non_success_response_and_keeps_data() {
+    // First GET (create_context) succeeds, the refresh GET returns 500.
+    let server = start_server(Plan {
+        get: [200, 500].into(),
+        ..Plan::default()
+    })
+    .await;
+    let mut context = sdk(&server.base)
+        .create_context([("session_id", "user-1")], None)
+        .await
+        .unwrap();
+    let before = context.experiments().len();
+    assert!(before > 0);
+    let result = tokio::task::spawn_blocking(move || {
+        let r = context.refresh();
+        (context, r)
+    })
+    .await
+    .unwrap();
+    assert!(result.1.is_err());
+    assert_eq!(result.0.experiments().len(), before);
+}

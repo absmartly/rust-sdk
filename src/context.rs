@@ -571,15 +571,16 @@ impl Context {
     /// Fetch fresh data with the configured data fetcher and apply it.
     /// A fetch failure is returned and also emitted as an `error` event.
     pub fn refresh(&mut self) -> Result<(), String> {
-        let fetcher = self
-            .data_fetcher
-            .as_ref()
-            .ok_or_else(|| "Cannot refresh: no data fetcher configured".to_string())?;
+        if self.is_finalized() || self.is_finalizing() {
+            return Err("ABsmartly Context is finalized.".to_string());
+        }
+        let Some(fetcher) = self.data_fetcher.as_ref() else {
+            let e = "Cannot refresh: no data fetcher configured".to_string();
+            self.log_error(&e);
+            return Err(e);
+        };
         match fetcher() {
-            Ok(new_data) => {
-                self.refresh_with(new_data);
-                Ok(())
-            }
+            Ok(new_data) => self.refresh_with(new_data),
             Err(e) => {
                 self.log_error(&e);
                 Err(e)
@@ -587,7 +588,12 @@ impl Context {
         }
     }
 
-    pub fn refresh_with(&mut self, new_data: ContextData) {
+    /// Apply `new_data`. A finalized or finalizing context is left unchanged
+    /// and an error is returned.
+    pub fn refresh_with(&mut self, new_data: ContextData) -> Result<(), String> {
+        if self.is_finalized() || self.is_finalizing() {
+            return Err("ABsmartly Context is finalized.".to_string());
+        }
         self.init(new_data);
         let to_remove: Vec<String> = {
             let assignments = &self.assignments;
@@ -619,6 +625,7 @@ impl Context {
                 error!("Failed to serialize context data for refresh: {}", e);
             }
         }
+        Ok(())
     }
 
     /// Send the pending exposures and goals to the publisher.
@@ -1504,6 +1511,21 @@ mod tests {
             });
         }));
         (ctx, log)
+    }
+
+    #[test]
+    fn test_refresh_without_fetcher_emits_error_event() {
+        let (mut ctx, log) = make_logging_context(make_context_data(vec![]));
+        assert!(ctx.refresh().is_err());
+        assert!(log.lock().unwrap().iter().any(|e| e.event == "error"));
+    }
+
+    #[test]
+    fn test_refresh_after_finalize_is_rejected() {
+        let mut ctx = Context::new(make_context_data(vec![]));
+        ctx.finalize().unwrap();
+        assert!(ctx.refresh_with(make_context_data(vec![])).is_err());
+        assert!(ctx.refresh().is_err());
     }
 
     #[test]

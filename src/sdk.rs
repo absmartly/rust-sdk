@@ -158,6 +158,39 @@ pub struct ABsmartly {
     client: Client,
 }
 
+/// Source-compatible entry point from before the builder API:
+/// `SDK::new(SDKConfig)`. It dereferences to [`ABsmartly`], so every
+/// `ABsmartly` method is available on it.
+pub struct SDK(ABsmartly);
+
+impl SDK {
+    pub fn new(config: SDKConfig) -> Result<Self, SDKError> {
+        let mut builder = ABsmartly::builder()
+            .endpoint(config.endpoint)
+            .api_key(config.api_key)
+            .application(config.application)
+            .environment(config.environment);
+        if let Some(agent) = config.agent {
+            builder = builder.agent(agent);
+        }
+        if let Some(timeout_ms) = config.timeout_ms {
+            builder = builder.timeout(timeout_ms);
+        }
+        if let Some(retries) = config.retries {
+            builder = builder.retries(retries);
+        }
+        builder.build().map(SDK)
+    }
+}
+
+impl std::ops::Deref for SDK {
+    type Target = ABsmartly;
+
+    fn deref(&self) -> &ABsmartly {
+        &self.0
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SDKError {
     #[error("HTTP request failed: {0}")]
@@ -353,6 +386,9 @@ impl ABsmartly {
                     .send()
                     .await
                     .map_err(|e| format!("Refresh fetch failed: {}", e))?;
+                if !resp.status().is_success() {
+                    return Err(format!("Refresh fetch failed: HTTP {}", resp.status()));
+                }
                 resp.json::<ContextData>()
                     .await
                     .map_err(|e| format!("Refresh parse failed: {}", e))

@@ -12,4 +12,4 @@ pub mod utils;
 pub use context::Context;
 pub use context_publisher::{ContextPublisher, DefaultContextPublisher};
 pub use models::*;
-pub use sdk::{ABsmartly, ABsmartlyBuilder, SDKConfig, SDKError};
+pub use sdk::{ABsmartly, ABsmartlyBuilder, SDKConfig, SDKError, SDK};
