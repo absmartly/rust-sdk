@@ -77,6 +77,61 @@ mod tests {
         assert_eq!(hash_unit("user_世界_123"), "SCgk4OzXlFMvo1UMsP88fA");
     }
 
+    // Shared cross-SDK vectors (/tmp/utf8-vectors/vectors.json), validated
+    // against the JS SDK's stringToUint8Array/hashUnit: (value, UTF-8 bytes, hash).
+    const UTF8_VECTORS: &[(&str, &[u8], &str)] = &[
+        (
+            "user😀id",
+            &[117, 115, 101, 114, 240, 159, 152, 128, 105, 100],
+            "nnPMxN6wY36LGRnuJ6jZrw",
+        ),
+        ("😀", &[240, 159, 152, 128], "KgLqw51xanDs83V5GFkntg"),
+        ("𠀋", &[240, 160, 128, 139], "8mWvgvNGn-DZqb6Ft0HVjA"),
+        (
+            "a€𝄞z",
+            &[97, 226, 130, 172, 240, 157, 132, 158, 122],
+            "AGGq8R9K1XjO77q33izhLg",
+        ),
+        (
+            "🇵🇹",
+            &[240, 159, 135, 181, 240, 159, 135, 185],
+            "1RRpVphazpblARsm5DaSkg",
+        ),
+    ];
+
+    #[test]
+    fn test_hash_unit_utf8_vectors() {
+        for (value, utf8, hash) in UTF8_VECTORS {
+            assert_eq!(value.as_bytes(), *utf8, "UTF-8 bytes of {:?}", value);
+            assert_eq!(hash_unit(value), *hash, "hash of {:?}", value);
+        }
+    }
+
+    #[test]
+    fn test_hash_unit_lone_surrogate_replaced() {
+        // A `&str` cannot hold a lone surrogate (serde_json rejects a JSON
+        // `\ud83d` escape that is not part of a pair). Decoding UTF-16 lossily
+        // replaces it with U+FFFD, the same bytes the JS SDK hashes.
+        let value = String::from_utf16_lossy(&[0x61, 0x62, 0xD83D, 0x63, 0x64]);
+        assert_eq!(value.as_bytes(), &[97, 98, 239, 191, 189, 99, 100]);
+        assert_eq!(hash_unit(&value), "jvDxBUzS9Tdsml3QQStWSg");
+    }
+
+    #[test]
+    fn test_assign_utf8_units() {
+        use crate::assigner::VariantAssigner;
+        let split = [0.5, 0.5];
+        for (unit, expected) in [("😀", 1), ("🇵🇹", 0), ("a€𝄞z", 1), ("user😀id", 0)] {
+            let assigner = VariantAssigner::new(&hash_unit(unit));
+            assert_eq!(
+                assigner.assign(&split, 3603583, 233373918),
+                expected,
+                "variant of {:?}",
+                unit
+            );
+        }
+    }
+
     #[test]
     fn test_hash_unit_no_padding_or_special_chars() {
         let hash = hash_unit("test123");

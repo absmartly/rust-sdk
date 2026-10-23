@@ -2,8 +2,10 @@ use log::error;
 use regex::RegexBuilder;
 use serde_json::Value;
 
-use super::evaluator::{values_equal_deep, Evaluator};
+use super::evaluator::Evaluator;
 
+/// `and`: false at the first falsy operand, else true. Null when the
+/// arguments are not an array.
 pub fn and_op(evaluator: &Evaluator, args: &Value) -> Value {
     if let Value::Array(exprs) = args {
         for expr in exprs {
@@ -14,10 +16,12 @@ pub fn and_op(evaluator: &Evaluator, args: &Value) -> Value {
         }
         Value::Bool(true)
     } else {
-        Value::Bool(false)
+        Value::Null
     }
 }
 
+/// `or`: true at the first truthy operand; an empty list is true. Null when
+/// the arguments are not an array.
 pub fn or_op(evaluator: &Evaluator, args: &Value) -> Value {
     if let Value::Array(exprs) = args {
         for expr in exprs {
@@ -26,9 +30,9 @@ pub fn or_op(evaluator: &Evaluator, args: &Value) -> Value {
                 return Value::Bool(true);
             }
         }
-        Value::Bool(false)
+        Value::Bool(exprs.is_empty())
     } else {
-        Value::Bool(false)
+        Value::Null
     }
 }
 
@@ -36,8 +40,13 @@ pub fn value_op(_evaluator: &Evaluator, args: &Value) -> Value {
     args.clone()
 }
 
+/// `var`: the path is a string, or an object with a string `path`.
 pub fn var_op(evaluator: &Evaluator, args: &Value) -> Value {
-    if let Value::String(path) = args {
+    let path = match args {
+        Value::Object(map) => map.get("path").unwrap_or(&Value::Null),
+        other => other,
+    };
+    if let Value::String(path) = path {
         evaluator.extract_var(path)
     } else {
         Value::Null
@@ -54,175 +63,120 @@ pub fn not_op(evaluator: &Evaluator, args: &Value) -> Value {
     Value::Bool(!evaluator.boolean_convert(&result))
 }
 
-/// Legacy `in` operator. Audiences already in production use the original
-/// needle-first order `[needle, haystack]`, the cross-SDK contract is
-/// haystack-first `[haystack, needle]`. Both are accepted: haystack-first
-/// wins unless arg 0 is not an array/object while arg 1 is, in which case arg 0
-/// is the needle (the legacy order). Two strings are read haystack-first.
+/// Evaluate a binary operator's two operands. Null (and `op` is not called)
+/// when the arguments are not an array or either operand evaluates to null.
+fn binary(
+    evaluator: &Evaluator,
+    args: &Value,
+    op: impl FnOnce(&Value, &Value) -> Value,
+) -> Value {
+    let Value::Array(arr) = args else {
+        return Value::Null;
+    };
+    let lhs = arr.first().map_or(Value::Null, |a| evaluator.evaluate(a));
+    if lhs.is_null() {
+        return Value::Null;
+    }
+    let rhs = arr.get(1).map_or(Value::Null, |a| evaluator.evaluate(a));
+    if rhs.is_null() {
+        return Value::Null;
+    }
+    op(&lhs, &rhs)
+}
+
+/// Map a comparison to a boolean, or null when the operands are not comparable.
+fn compared(result: Option<i32>, test: impl FnOnce(i32) -> bool) -> Value {
+    result.map_or(Value::Null, |r| Value::Bool(test(r)))
+}
+
+/// `in`: `[haystack, needle]`. An array haystack holds the needle when an item
+/// compares equal to it; a string haystack contains the needle converted to a
+/// string; an object haystack has the needle as a key. Any other haystack is
+/// null.
 pub fn in_op(evaluator: &Evaluator, args: &Value) -> Value {
-    if let Value::Array(arr) = args {
-        if arr.len() != 2 {
-            return Value::Bool(false);
-        }
-        let is_collection = |v: &Value| matches!(v, Value::Array(_) | Value::Object(_));
-        let first = evaluator.evaluate(&arr[0]);
-        let second = evaluator.evaluate(&arr[1]);
-        let (haystack, needle) = if !is_collection(&first) && is_collection(&second) {
-            (second, first)
-        } else {
-            (first, second)
-        };
-        contains_values(&haystack, &needle)
-    } else {
-        Value::Bool(false)
+    binary(evaluator, args, |haystack, needle| {
+        haystack_contains(evaluator, haystack, needle)
+    })
+}
+
+fn haystack_contains(evaluator: &Evaluator, haystack: &Value, needle: &Value) -> Value {
+    match haystack {
+        Value::Array(items) => Value::Bool(
+            items
+                .iter()
+                .any(|item| evaluator.compare(item, needle) == Some(0)),
+        ),
+        Value::String(h) => Value::Bool(
+            evaluator
+                .string_convert(needle)
+                .is_some_and(|n| h.contains(n.as_str())),
+        ),
+        Value::Object(map) => Value::Bool(
+            evaluator
+                .string_convert(needle)
+                .is_some_and(|n| map.contains_key(&n)),
+        ),
+        _ => Value::Null,
     }
 }
 
-fn contains_values(haystack: &Value, needle: &Value) -> Value {
-    match (needle, haystack) {
-        (Value::String(n), Value::String(h)) => Value::Bool(h.contains(n.as_str())),
-        (_, Value::Array(h_arr)) => {
-            Value::Bool(h_arr.iter().any(|item| values_equal_deep(needle, item)))
-        }
-        (Value::String(n), Value::Object(h_map)) => Value::Bool(h_map.contains_key(n)),
-        _ => Value::Bool(false),
-    }
-}
-
-/// CONTAINS operator: operand order is haystack-first, `[haystack, needle]`,
-/// matching the collector and the other ABsmartly SDKs.
+/// `contains`: the same operation as `in`, `[haystack, needle]`.
 pub fn contains_op(evaluator: &Evaluator, args: &Value) -> Value {
-    if let Value::Array(arr) = args {
-        if arr.len() != 2 {
-            return Value::Bool(false);
-        }
-
-        let haystack = evaluator.evaluate(&arr[0]);
-        let needle = evaluator.evaluate(&arr[1]);
-
-        contains_values(&haystack, &needle)
-    } else {
-        Value::Bool(false)
-    }
+    in_op(evaluator, args)
 }
 
+/// `match`: `[text, pattern]`, both converted to strings. Null when either
+/// cannot be converted or the pattern is not a valid regex.
 pub fn match_op(evaluator: &Evaluator, args: &Value) -> Value {
-    if let Value::Array(arr) = args {
-        if arr.len() != 2 {
-            return Value::Bool(false);
-        }
-
-        let text = evaluator.evaluate(&arr[0]);
-        let pattern = evaluator.evaluate(&arr[1]);
-
-        if let (Some(text_str), Some(pattern_str)) = (
-            evaluator.string_convert(&text),
-            evaluator.string_convert(&pattern),
-        ) {
-            match RegexBuilder::new(&pattern_str)
-                .size_limit(100_000)
-                .dfa_size_limit(1_000_000)
-                .build()
-            {
-                Ok(regex) => Value::Bool(regex.is_match(&text_str)),
-                Err(e) => {
-                    error!("Invalid regex pattern '{}': {}", pattern_str, e);
-                    Value::Null
-                }
+    binary(evaluator, args, |text, pattern| {
+        let (Some(text), Some(pattern)) =
+            (evaluator.string_convert(text), evaluator.string_convert(pattern))
+        else {
+            return Value::Null;
+        };
+        match RegexBuilder::new(&pattern)
+            .size_limit(100_000)
+            .dfa_size_limit(1_000_000)
+            .build()
+        {
+            Ok(regex) => Value::Bool(regex.is_match(&text)),
+            Err(e) => {
+                error!("Invalid regex pattern '{}': {}", pattern, e);
+                Value::Null
             }
-        } else {
-            Value::Bool(false)
         }
-    } else {
-        Value::Bool(false)
-    }
+    })
 }
 
+/// `eq`. A null operand gives null, so `eq(null, null)` is null, not true.
 pub fn eq_op(evaluator: &Evaluator, args: &Value) -> Value {
-    if let Value::Array(arr) = args {
-        if arr.len() != 2 {
-            return Value::Bool(false);
-        }
-
-        let lhs = evaluator.evaluate(&arr[0]);
-        let rhs = evaluator.evaluate(&arr[1]);
-
-        // A null operand short-circuits to null (canonical: eq does not treat
-        // null == null as a match), matching the other SDKs and the collector.
-        if lhs.is_null() || rhs.is_null() {
-            return Value::Null;
-        }
-
-        let result = evaluator.compare(&lhs, &rhs);
-
-        Value::Bool(result == Some(0))
-    } else {
-        Value::Bool(false)
-    }
+    binary(evaluator, args, |lhs, rhs| {
+        compared(evaluator.compare(lhs, rhs), |r| r == 0)
+    })
 }
 
 pub fn gt_op(evaluator: &Evaluator, args: &Value) -> Value {
-    if let Value::Array(arr) = args {
-        if arr.len() != 2 {
-            return Value::Bool(false);
-        }
-
-        let lhs = evaluator.evaluate(&arr[0]);
-        let rhs = evaluator.evaluate(&arr[1]);
-        let result = evaluator.compare(&lhs, &rhs);
-
-        Value::Bool(result.is_some_and(|r| r > 0))
-    } else {
-        Value::Bool(false)
-    }
+    binary(evaluator, args, |lhs, rhs| {
+        compared(evaluator.compare(lhs, rhs), |r| r > 0)
+    })
 }
 
 pub fn gte_op(evaluator: &Evaluator, args: &Value) -> Value {
-    if let Value::Array(arr) = args {
-        if arr.len() != 2 {
-            return Value::Bool(false);
-        }
-
-        let lhs = evaluator.evaluate(&arr[0]);
-        let rhs = evaluator.evaluate(&arr[1]);
-        let result = evaluator.compare(&lhs, &rhs);
-
-        Value::Bool(result.is_some_and(|r| r >= 0))
-    } else {
-        Value::Bool(false)
-    }
+    binary(evaluator, args, |lhs, rhs| {
+        compared(evaluator.compare(lhs, rhs), |r| r >= 0)
+    })
 }
 
 pub fn lt_op(evaluator: &Evaluator, args: &Value) -> Value {
-    if let Value::Array(arr) = args {
-        if arr.len() != 2 {
-            return Value::Bool(false);
-        }
-
-        let lhs = evaluator.evaluate(&arr[0]);
-        let rhs = evaluator.evaluate(&arr[1]);
-        let result = evaluator.compare(&lhs, &rhs);
-
-        Value::Bool(result.is_some_and(|r| r < 0))
-    } else {
-        Value::Bool(false)
-    }
+    binary(evaluator, args, |lhs, rhs| {
+        compared(evaluator.compare(lhs, rhs), |r| r < 0)
+    })
 }
 
 pub fn lte_op(evaluator: &Evaluator, args: &Value) -> Value {
-    if let Value::Array(arr) = args {
-        if arr.len() != 2 {
-            return Value::Bool(false);
-        }
-
-        let lhs = evaluator.evaluate(&arr[0]);
-        let rhs = evaluator.evaluate(&arr[1]);
-        let result = evaluator.compare(&lhs, &rhs);
-
-        Value::Bool(result.is_some_and(|r| r <= 0))
-    } else {
-        Value::Bool(false)
-    }
+    binary(evaluator, args, |lhs, rhs| {
+        compared(evaluator.compare(lhs, rhs), |r| r <= 0)
+    })
 }
 
 #[cfg(test)]
@@ -575,14 +529,105 @@ mod tests {
     }
 
     #[test]
-    fn test_in_op_accepts_legacy_needle_first_and_haystack_first() {
+    fn test_in_op_is_haystack_first_only() {
         let evaluator = Evaluator::new(HashMap::new());
-        let legacy = json!([{"value": "US"}, {"value": ["US", "CA"]}]);
-        let new = json!([{"value": ["US", "CA"]}, {"value": "US"}]);
-        let miss = json!([{"value": "FR"}, {"value": ["US", "CA"]}]);
-        assert_eq!(in_op(&evaluator, &legacy), Value::Bool(true));
-        assert_eq!(in_op(&evaluator, &new), Value::Bool(true));
+        let haystack_first = json!([{"value": ["US", "CA"]}, {"value": "US"}]);
+        let miss = json!([{"value": ["US", "CA"]}, {"value": "FR"}]);
+        // The old needle-first order is no longer recognised: a string
+        // haystack does not contain the array needle.
+        let needle_first = json!([{"value": "US"}, {"value": ["US", "CA"]}]);
+        assert_eq!(in_op(&evaluator, &haystack_first), Value::Bool(true));
         assert_eq!(in_op(&evaluator, &miss), Value::Bool(false));
+        assert_eq!(in_op(&evaluator, &needle_first), Value::Bool(false));
+    }
+
+    #[test]
+    fn test_in_op_non_collection_haystack_is_null() {
+        let evaluator = make_evaluator();
+        assert_eq!(in_op(&evaluator, &json!([{"value": 5}, {"value": 5}])), Value::Null);
+        assert_eq!(
+            in_op(&evaluator, &json!([{"value": true}, {"value": true}])),
+            Value::Null
+        );
+        assert_eq!(
+            in_op(&evaluator, &json!([{"value": null}, {"value": "a"}])),
+            Value::Null
+        );
+        assert_eq!(
+            in_op(&evaluator, &json!([{"value": ["a"]}, {"value": null}])),
+            Value::Null
+        );
+        assert_eq!(in_op(&evaluator, &json!({"value": 1})), Value::Null);
+    }
+
+    #[test]
+    fn test_in_op_converts_needle() {
+        let evaluator = make_evaluator();
+        // Array items are compared with the evaluator's coercion.
+        assert_eq!(
+            in_op(&evaluator, &json!([{"value": [1, 2, 3]}, {"value": "2"}])),
+            json!(true)
+        );
+        assert_eq!(
+            in_op(&evaluator, &json!([{"value": ["1", "2"]}, {"value": 2}])),
+            json!(true)
+        );
+        // String haystack: a number or boolean needle is converted to a string.
+        assert_eq!(
+            in_op(&evaluator, &json!([{"value": "abc123"}, {"value": 123}])),
+            json!(true)
+        );
+        assert_eq!(
+            in_op(&evaluator, &json!([{"value": "is true"}, {"value": true}])),
+            json!(true)
+        );
+        // Object haystack: key lookup with the needle as a string.
+        assert_eq!(
+            in_op(&evaluator, &json!([{"value": {"1": "x"}}, {"value": 1}])),
+            json!(true)
+        );
+        assert_eq!(
+            in_op(&evaluator, &json!([{"value": "abc"}, {"value": [1]}])),
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn test_binary_operators_null_operand_is_null() {
+        let evaluator = make_evaluator();
+        for op in [eq_op, gt_op, gte_op, lt_op, lte_op, match_op, in_op, contains_op] {
+            assert_eq!(op(&evaluator, &json!([{"value": null}, {"value": 1}])), Value::Null);
+            assert_eq!(op(&evaluator, &json!([{"value": "1"}, {"value": null}])), Value::Null);
+            assert_eq!(op(&evaluator, &json!([{"value": "1"}])), Value::Null);
+            assert_eq!(op(&evaluator, &json!("1")), Value::Null);
+        }
+    }
+
+    #[test]
+    fn test_compare_operators_not_comparable_is_null() {
+        let evaluator = make_evaluator();
+        for op in [eq_op, gt_op, gte_op, lt_op, lte_op] {
+            assert_eq!(
+                op(&evaluator, &json!([{"value": 1}, {"value": "abc"}])),
+                Value::Null
+            );
+        }
+    }
+
+    #[test]
+    fn test_and_or_non_array_and_empty() {
+        let evaluator = make_evaluator();
+        assert_eq!(and_op(&evaluator, &json!({"value": true})), Value::Null);
+        assert_eq!(or_op(&evaluator, &json!({"value": true})), Value::Null);
+        assert_eq!(and_op(&evaluator, &json!([])), json!(true));
+        assert_eq!(or_op(&evaluator, &json!([])), json!(true));
+    }
+
+    #[test]
+    fn test_var_op_object_path() {
+        let evaluator = make_evaluator();
+        assert_eq!(var_op(&evaluator, &json!({"path": "age"})), json!(25));
+        assert_eq!(var_op(&evaluator, &json!({"path": 1})), Value::Null);
     }
 
     #[test]
@@ -727,14 +772,14 @@ mod tests {
         let evaluator = make_evaluator();
         assert_eq!(
             match_op(&evaluator, &json!([{"value": null}, {"value": "abc"}])),
-            json!(false)
+            Value::Null
         );
         assert_eq!(
             match_op(
                 &evaluator,
                 &json!([{"value": "abcdefghijk"}, {"value": null}])
             ),
-            json!(false)
+            Value::Null
         );
     }
 

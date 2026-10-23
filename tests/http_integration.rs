@@ -177,7 +177,7 @@ async fn real_http_get_and_put_against_local_server() {
     assert!(context.is_ready(), "context should be ready after fetch");
 
     // ---- Queue an event: treatment (exposure) + track (goal) ----
-    let _variant = context.treatment("exp_test");
+    let _variant = context.treatment("exp_test").unwrap();
     context
         .track("payment", serde_json::json!({ "value": 42 }))
         .expect("track should succeed");

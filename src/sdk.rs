@@ -197,11 +197,121 @@ pub enum SDKError {
     HttpError(#[from] reqwest::Error),
     #[error("Invalid configuration: {0}")]
     ConfigError(String),
+    #[error("Request timed out after {0}ms")]
+    Timeout(u64),
 }
 
-fn backoff_ms(max_retries: u32, retries_remaining: u32) -> u64 {
-    let attempt = (max_retries - retries_remaining).min(10);
-    50u64.saturating_mul(2u64.saturating_pow(attempt))
+const DEFAULT_AGENT: &str = "absmartly-rust-sdk";
+const RETRY_DELAY_MS: u64 = 50;
+
+/// Delay before retry number `tries + 1`: `2^tries * 50ms` (exponent capped
+/// at 10), as in the JS SDK client, without its jitter.
+fn retry_delay_ms(tries: u32) -> u64 {
+    (1u64 << tries.min(10)) * RETRY_DELAY_MS
+}
+
+/// Up to half the base retry delay, so clients that failed together do not
+/// retry together.
+fn retry_jitter_ms() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    u64::from(nanos) % (RETRY_DELAY_MS / 2 + 1)
+}
+
+/// Send the request built by `build`, retrying like the JS SDK client: a
+/// network error or 5xx is retried up to `config.retries` more times with
+/// exponential backoff, a 4xx fails at once, and the whole exchange (all
+/// attempts and waits) is bounded by `config.timeout_ms` (0 = no deadline).
+pub(crate) async fn send_with_retry<F>(
+    config: &SDKConfig,
+    build: F,
+) -> Result<reqwest::Response, SDKError>
+where
+    F: Fn() -> reqwest::RequestBuilder,
+{
+    let retries = config.retries.unwrap_or(5);
+    let timeout_ms = config.timeout_ms.unwrap_or(3000);
+    let attempts = async {
+        let mut tries = 0u32;
+        let mut waited = 0u64;
+        loop {
+            let error = match build().send().await {
+                Ok(resp) if resp.status().is_success() => return Ok(resp),
+                Ok(resp) => {
+                    let bail = resp.status().is_client_error();
+                    let error = SDKError::HttpError(resp.error_for_status().unwrap_err());
+                    if bail {
+                        return Err(error);
+                    }
+                    error
+                }
+                Err(e) => SDKError::HttpError(e),
+            };
+            if tries >= retries {
+                return Err(error);
+            }
+            let mut delay = retry_delay_ms(tries) + retry_jitter_ms();
+            if timeout_ms > 0 {
+                if waited >= timeout_ms {
+                    return Err(error);
+                }
+                delay = delay.min(timeout_ms - waited);
+            }
+            warn!("Request failed, retrying in {}ms: {}", delay, error);
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            waited += delay;
+            tries += 1;
+        }
+    };
+    if timeout_ms == 0 {
+        return attempts.await;
+    }
+    tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), attempts)
+        .await
+        .unwrap_or(Err(SDKError::Timeout(timeout_ms)))
+}
+
+/// Add the headers the JS SDK client sends on every request: `X-API-Key`,
+/// `X-Agent`, `X-Environment`, `X-Application`, `X-Application-Version`,
+/// `Content-Type`, plus `User-Agent` when an agent is configured.
+fn with_headers(request: reqwest::RequestBuilder, config: &SDKConfig) -> reqwest::RequestBuilder {
+    let agent = config.agent.as_deref().unwrap_or(DEFAULT_AGENT);
+    let mut request = request
+        .header("Content-Type", "application/json")
+        .header("X-API-Key", &config.api_key)
+        .header("X-Agent", agent)
+        .header("X-Application-Version", "0");
+    if !config.application.is_empty() {
+        request = request.header("X-Application", &config.application);
+    }
+    if !config.environment.is_empty() {
+        request = request.header("X-Environment", &config.environment);
+    }
+    if let Some(ref agent) = config.agent {
+        request = request.header("User-Agent", agent);
+    }
+    request
+}
+
+fn context_url(config: &SDKConfig) -> String {
+    format!(
+        "{}/context?application={}&environment={}",
+        config.endpoint.trim_end_matches('/'),
+        urlencoding::encode(&config.application),
+        urlencoding::encode(&config.environment)
+    )
+}
+
+/// `GET {endpoint}/context`, with the JS SDK client's headers and retries.
+pub(crate) async fn fetch_context(
+    client: &Client,
+    config: &SDKConfig,
+) -> Result<ContextData, SDKError> {
+    let url = context_url(config);
+    let resp = send_with_retry(config, || with_headers(client.get(&url), config)).await?;
+    Ok(resp.json().await?)
 }
 
 impl ABsmartly {
@@ -269,67 +379,7 @@ impl ABsmartly {
     }
 
     async fn fetch_context_data(&self) -> Result<ContextData, SDKError> {
-        let url = self.context_url();
-
-        let mut retries = self.config.retries.unwrap_or(5);
-        let mut last_error = None;
-
-        while retries > 0 {
-            let mut request = self
-                .client
-                .get(&url)
-                .header("X-API-Key", &self.config.api_key);
-            if let Some(ref agent) = self.config.agent {
-                request = request.header("User-Agent", agent);
-            }
-            let response = request.send().await;
-
-            match response {
-                Ok(resp) => {
-                    if resp.status().is_success() {
-                        return Ok(resp.json().await?);
-                    } else if resp.status().is_server_error() {
-                        retries -= 1;
-                        last_error =
-                            Some(SDKError::HttpError(resp.error_for_status().unwrap_err()));
-                        let max_retries = self.config.retries.unwrap_or(5);
-                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms(
-                            max_retries,
-                            retries,
-                        )))
-                        .await;
-                        continue;
-                    } else {
-                        return Err(SDKError::HttpError(resp.error_for_status().unwrap_err()));
-                    }
-                }
-                Err(e) => {
-                    retries -= 1;
-                    last_error = Some(SDKError::HttpError(e));
-                    if retries > 0 {
-                        let max_retries = self.config.retries.unwrap_or(5);
-                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms(
-                            max_retries,
-                            retries,
-                        )))
-                        .await;
-                    }
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| {
-            SDKError::ConfigError("Failed to create context after retries".to_string())
-        }))
-    }
-
-    fn context_url(&self) -> String {
-        format!(
-            "{}/context?application={}&environment={}",
-            self.config.endpoint.trim_end_matches('/'),
-            urlencoding::encode(&self.config.application),
-            urlencoding::encode(&self.config.environment)
-        )
+        fetch_context(&self.client, &self.config).await
     }
 
     pub fn create_context_with<I, K, V>(
@@ -368,27 +418,13 @@ impl ABsmartly {
             self.client.clone(),
         )));
 
-        let url = self.context_url();
-        let api_key = self.config.api_key.clone();
-        let agent = self.config.agent.clone();
-        let timeout_ms = self.config.timeout_ms.unwrap_or(3000);
+        let config = self.config.clone();
         context.set_data_fetcher(Box::new(move || {
             run_blocking(async {
-                let client = blocking_client(timeout_ms)?;
-                let mut request = client.get(&url).header("X-API-Key", &api_key);
-                if let Some(ref a) = agent {
-                    request = request.header("User-Agent", a);
-                }
-                let resp = request
-                    .send()
+                let client = blocking_client(config.timeout_ms.unwrap_or(3000))?;
+                fetch_context(&client, &config)
                     .await
-                    .map_err(|e| format!("Refresh fetch failed: {}", e))?;
-                if !resp.status().is_success() {
-                    return Err(format!("Refresh fetch failed: HTTP {}", resp.status()));
-                }
-                resp.json::<ContextData>()
-                    .await
-                    .map_err(|e| format!("Refresh parse failed: {}", e))
+                    .map_err(|e| format!("Refresh fetch failed: {}", e))
             })?
         }));
 
@@ -462,40 +498,17 @@ where
         .collect()
 }
 
-/// Send `PUT {endpoint}/context` with the canonical publish headers. Shared by
-/// [`ABsmartly::publish`] and the `DefaultContextPublisher`, so both send the
-/// same request.
+/// Send `PUT {endpoint}/context` with the JS SDK client's headers and
+/// retries. Shared by [`ABsmartly::publish`] and the `DefaultContextPublisher`,
+/// so both send the same request.
 pub(crate) async fn send_publish(
     client: &Client,
     config: &SDKConfig,
     params: &PublishParams,
 ) -> Result<(), SDKError> {
     let url = format!("{}/context", config.endpoint.trim_end_matches('/'));
-
-    let mut request = client
-        .put(&url)
-        .header("X-API-Key", &config.api_key)
-        .header("X-Application-Version", "0")
-        .header("Content-Type", "application/json")
-        .json(params);
-    if !config.application.is_empty() {
-        request = request.header("X-Application", &config.application);
-    }
-    if !config.environment.is_empty() {
-        request = request.header("X-Environment", &config.environment);
-    }
-    if let Some(ref agent) = config.agent {
-        request = request.header("User-Agent", agent).header("X-Agent", agent);
-    }
-    let response = request.send().await?;
-
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(SDKError::HttpError(
-            response.error_for_status().unwrap_err(),
-        ))
-    }
+    send_with_retry(config, || with_headers(client.put(&url), config).json(params)).await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -775,20 +788,17 @@ mod tests {
     }
 
     #[test]
-    fn test_backoff_ms_calculation() {
-        assert_eq!(backoff_ms(5, 5), 50);
-        assert_eq!(backoff_ms(5, 4), 100);
-        assert_eq!(backoff_ms(5, 3), 200);
-        assert_eq!(backoff_ms(5, 2), 400);
-        assert_eq!(backoff_ms(5, 1), 800);
-        assert_eq!(backoff_ms(5, 0), 1600);
+    fn test_retry_delay_ms_calculation() {
+        assert_eq!(retry_delay_ms(0), 50);
+        assert_eq!(retry_delay_ms(1), 100);
+        assert_eq!(retry_delay_ms(2), 200);
+        assert_eq!(retry_delay_ms(3), 400);
+        assert_eq!(retry_delay_ms(4), 800);
     }
 
     #[test]
-    fn test_backoff_ms_caps_at_10() {
-        let at_10 = backoff_ms(15, 5);
-        let at_11 = backoff_ms(15, 4);
-        assert_eq!(at_10, at_11);
+    fn test_retry_delay_ms_caps_at_10() {
+        assert_eq!(retry_delay_ms(10), retry_delay_ms(11));
     }
 
     #[test]

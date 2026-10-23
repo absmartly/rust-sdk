@@ -155,9 +155,44 @@ fn sdk(base: &str) -> ABsmartly {
         .application("www")
         .environment("production")
         .agent("absmartly-rust-sdk")
-        .retries(1)
+        .retries(0)
         .build()
         .unwrap()
+}
+
+fn retrying_sdk(base: &str, retries: u32, timeout_ms: u64) -> ABsmartly {
+    ABsmartly::builder()
+        .endpoint(base)
+        .api_key("test-api-key")
+        .application("www")
+        .environment("production")
+        .agent("absmartly-rust-sdk")
+        .retries(retries)
+        .timeout(timeout_ms)
+        .build()
+        .unwrap()
+}
+
+impl Server {
+    fn gets(&self) -> Vec<Request> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "GET")
+            .cloned()
+            .collect()
+    }
+}
+
+fn assert_js_headers(request: &Request) {
+    assert_eq!(request.header("X-API-Key"), Some("test-api-key"));
+    assert_eq!(request.header("X-Application"), Some("www"));
+    assert_eq!(request.header("X-Environment"), Some("production"));
+    assert_eq!(request.header("X-Application-Version"), Some("0"));
+    assert_eq!(request.header("X-Agent"), Some("absmartly-rust-sdk"));
+    assert_eq!(request.header("User-Agent"), Some("absmartly-rust-sdk"));
+    assert_eq!(request.header("Content-Type"), Some("application/json"));
 }
 
 type Events = Arc<Mutex<Vec<(String, Option<Value>)>>>;
@@ -218,7 +253,7 @@ async fn create_context_or_failed_returns_failed_context_with_error_event() {
         .await;
 
     assert!(context.is_failed());
-    assert!(!context.is_ready());
+    assert!(context.is_ready());
     let ready_error = context.ready_error().expect("ready_error is set");
     assert!(ready_error.contains("404"), "got: {}", ready_error);
     assert_eq!(context.get_unit("session_id"), Some(&"user-1".to_string()));
@@ -257,7 +292,7 @@ async fn context_publish_failure_keeps_events_and_retry_delivers_them() {
         .create_context([("session_id", "user-1")], Some(options))
         .await
         .unwrap();
-    context.treatment("exp_test");
+    context.treatment("exp_test").unwrap();
     context
         .track("payment", serde_json::json!({"value": 1}))
         .unwrap();
@@ -291,7 +326,7 @@ async fn context_publish_sends_canonical_headers() {
         .create_context([("session_id", "user-1")], None)
         .await
         .unwrap();
-    context.treatment("exp_test");
+    context.treatment("exp_test").unwrap();
 
     context.publish().unwrap();
 
@@ -317,7 +352,7 @@ async fn finalize_publish_failure_leaves_context_open() {
         .create_context([("session_id", "user-1")], None)
         .await
         .unwrap();
-    context.treatment("exp_test");
+    context.treatment("exp_test").unwrap();
 
     assert!(context.finalize().is_err());
     assert!(!context.is_finalized());
@@ -340,7 +375,7 @@ async fn current_thread_runtime_publish_reports_result_and_never_panics() {
         .create_context([("session_id", "user-1")], None)
         .await
         .unwrap();
-    context.treatment("exp_test");
+    context.treatment("exp_test").unwrap();
 
     // The test server shares this single-threaded runtime, so run the
     // synchronous calls on a blocking thread to let it answer.
@@ -390,7 +425,7 @@ async fn refresh_rejects_non_success_response_and_keeps_data() {
         .create_context([("session_id", "user-1")], None)
         .await
         .unwrap();
-    let before = context.experiments().len();
+    let before = context.experiments().unwrap().len();
     assert!(before > 0);
     let result = tokio::task::spawn_blocking(move || {
         let r = context.refresh();
@@ -399,5 +434,125 @@ async fn refresh_rejects_non_success_response_and_keeps_data() {
     .await
     .unwrap();
     assert!(result.1.is_err());
-    assert_eq!(result.0.experiments().len(), before);
+    assert_eq!(result.0.experiments().unwrap().len(), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_fetch_and_refresh_send_js_headers() {
+    let server = start_server(Plan::default()).await;
+    let mut context = sdk(&server.base)
+        .create_context([("session_id", "user-1")], None)
+        .await
+        .unwrap();
+    let context = tokio::task::spawn_blocking(move || {
+        context.refresh().unwrap();
+        context
+    })
+    .await
+    .unwrap();
+    assert!(context.is_ready());
+
+    let gets = server.gets();
+    assert_eq!(gets.len(), 2, "create + refresh");
+    for get in &gets {
+        assert_js_headers(get);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publish_retries_server_errors() {
+    let server = start_server(Plan {
+        put: [500, 503].into(),
+        ..Plan::default()
+    })
+    .await;
+    let mut context = retrying_sdk(&server.base, 2, 3000)
+        .create_context([("session_id", "user-1")], None)
+        .await
+        .unwrap();
+    context.treatment("exp_test").unwrap();
+
+    let context = tokio::task::spawn_blocking(move || {
+        context.publish().expect("the third attempt succeeds");
+        context
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(context.pending(), 0);
+    let puts = server.puts();
+    assert_eq!(puts.len(), 3);
+    for put in &puts {
+        assert_js_headers(put);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refresh_retries_server_errors() {
+    let server = start_server(Plan {
+        get: [200, 500].into(),
+        ..Plan::default()
+    })
+    .await;
+    let mut context = retrying_sdk(&server.base, 1, 3000)
+        .create_context([("session_id", "user-1")], None)
+        .await
+        .unwrap();
+
+    let result = tokio::task::spawn_blocking(move || context.refresh())
+        .await
+        .unwrap();
+
+    assert!(result.is_ok(), "got: {:?}", result);
+    assert_eq!(server.gets().len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_errors_are_not_retried() {
+    let server = start_server(Plan {
+        put: [400].into(),
+        ..Plan::default()
+    })
+    .await;
+    let mut context = retrying_sdk(&server.base, 5, 3000)
+        .create_context([("session_id", "user-1")], None)
+        .await
+        .unwrap();
+    context.treatment("exp_test").unwrap();
+
+    let (context, result) = tokio::task::spawn_blocking(move || {
+        let r = context.publish();
+        (context, r)
+    })
+    .await
+    .unwrap();
+
+    assert!(result.is_err());
+    assert_eq!(context.pending(), 1);
+    assert_eq!(server.puts().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retries_stop_at_the_timeout_budget() {
+    // Every GET fails. With 10 retries the backoff alone would wait 51s; the
+    // 300ms timeout bounds the whole exchange instead.
+    let server = start_server(Plan {
+        get: [500; 20].into(),
+        ..Plan::default()
+    })
+    .await;
+    let started = std::time::Instant::now();
+    let result = retrying_sdk(&server.base, 10, 300)
+        .create_context([("session_id", "user-1")], None)
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(result.is_err());
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "took {:?}",
+        elapsed
+    );
+    let attempts = server.gets().len();
+    assert!((2..=6).contains(&attempts), "attempts: {}", attempts);
 }
