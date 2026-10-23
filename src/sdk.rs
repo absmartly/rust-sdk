@@ -1,5 +1,7 @@
 use crate::context::Context;
-use crate::models::{ContextData, ContextOptions};
+use crate::context_publisher::DefaultContextPublisher;
+use crate::models::{ContextData, ContextOptions, PublishParams};
+use log::warn;
 use reqwest::Client;
 
 #[derive(Debug, Clone)]
@@ -99,30 +101,36 @@ impl ABsmartlyBuilder {
     }
 
     pub fn build(self) -> Result<ABsmartly, SDKError> {
-        let endpoint = self.endpoint.ok_or_else(|| {
-            SDKError::ConfigError("endpoint is required".to_string())
-        })?;
-        let api_key = self.api_key.ok_or_else(|| {
-            SDKError::ConfigError("api_key is required".to_string())
-        })?;
-        let application = self.application.ok_or_else(|| {
-            SDKError::ConfigError("application is required".to_string())
-        })?;
-        let environment = self.environment.ok_or_else(|| {
-            SDKError::ConfigError("environment is required".to_string())
-        })?;
+        let endpoint = self
+            .endpoint
+            .ok_or_else(|| SDKError::ConfigError("endpoint is required".to_string()))?;
+        let api_key = self
+            .api_key
+            .ok_or_else(|| SDKError::ConfigError("api_key is required".to_string()))?;
+        let application = self
+            .application
+            .ok_or_else(|| SDKError::ConfigError("application is required".to_string()))?;
+        let environment = self
+            .environment
+            .ok_or_else(|| SDKError::ConfigError("environment is required".to_string()))?;
 
         if endpoint.is_empty() {
-            return Err(SDKError::ConfigError("endpoint cannot be empty".to_string()));
+            return Err(SDKError::ConfigError(
+                "endpoint cannot be empty".to_string(),
+            ));
         }
         if api_key.is_empty() {
             return Err(SDKError::ConfigError("api_key cannot be empty".to_string()));
         }
         if application.is_empty() {
-            return Err(SDKError::ConfigError("application cannot be empty".to_string()));
+            return Err(SDKError::ConfigError(
+                "application cannot be empty".to_string(),
+            ));
         }
         if environment.is_empty() {
-            return Err(SDKError::ConfigError("environment cannot be empty".to_string()));
+            return Err(SDKError::ConfigError(
+                "environment cannot be empty".to_string(),
+            ));
         }
 
         let config = SDKConfig {
@@ -150,12 +158,160 @@ pub struct ABsmartly {
     client: Client,
 }
 
+/// Source-compatible entry point from before the builder API:
+/// `SDK::new(SDKConfig)`. It dereferences to [`ABsmartly`], so every
+/// `ABsmartly` method is available on it.
+pub struct SDK(ABsmartly);
+
+impl SDK {
+    pub fn new(config: SDKConfig) -> Result<Self, SDKError> {
+        let mut builder = ABsmartly::builder()
+            .endpoint(config.endpoint)
+            .api_key(config.api_key)
+            .application(config.application)
+            .environment(config.environment);
+        if let Some(agent) = config.agent {
+            builder = builder.agent(agent);
+        }
+        if let Some(timeout_ms) = config.timeout_ms {
+            builder = builder.timeout(timeout_ms);
+        }
+        if let Some(retries) = config.retries {
+            builder = builder.retries(retries);
+        }
+        builder.build().map(SDK)
+    }
+}
+
+impl std::ops::Deref for SDK {
+    type Target = ABsmartly;
+
+    fn deref(&self) -> &ABsmartly {
+        &self.0
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SDKError {
     #[error("HTTP request failed: {0}")]
     HttpError(#[from] reqwest::Error),
     #[error("Invalid configuration: {0}")]
     ConfigError(String),
+    #[error("Request timed out after {0}ms")]
+    Timeout(u64),
+}
+
+const DEFAULT_AGENT: &str = "absmartly-rust-sdk";
+const RETRY_DELAY_MS: u64 = 50;
+
+/// Delay before retry number `tries + 1`: `2^tries * 50ms` (exponent capped
+/// at 10), as in the JS SDK client, without its jitter.
+fn retry_delay_ms(tries: u32) -> u64 {
+    (1u64 << tries.min(10)) * RETRY_DELAY_MS
+}
+
+/// Up to half the base retry delay, so clients that failed together do not
+/// retry together.
+fn retry_jitter_ms() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    u64::from(nanos) % (RETRY_DELAY_MS / 2 + 1)
+}
+
+/// Send the request built by `build`, retrying like the JS SDK client: a
+/// network error or 5xx is retried up to `config.retries` more times with
+/// exponential backoff, a 4xx fails at once, and the whole exchange (all
+/// attempts and waits) is bounded by `config.timeout_ms` (0 = no deadline).
+pub(crate) async fn send_with_retry<F>(
+    config: &SDKConfig,
+    build: F,
+) -> Result<reqwest::Response, SDKError>
+where
+    F: Fn() -> reqwest::RequestBuilder,
+{
+    let retries = config.retries.unwrap_or(5);
+    let timeout_ms = config.timeout_ms.unwrap_or(3000);
+    let attempts = async {
+        let mut tries = 0u32;
+        let mut waited = 0u64;
+        loop {
+            let error = match build().send().await {
+                Ok(resp) if resp.status().is_success() => return Ok(resp),
+                Ok(resp) => {
+                    let bail = resp.status().is_client_error();
+                    let error = SDKError::HttpError(resp.error_for_status().unwrap_err());
+                    if bail {
+                        return Err(error);
+                    }
+                    error
+                }
+                Err(e) => SDKError::HttpError(e),
+            };
+            if tries >= retries {
+                return Err(error);
+            }
+            let mut delay = retry_delay_ms(tries) + retry_jitter_ms();
+            if timeout_ms > 0 {
+                if waited >= timeout_ms {
+                    return Err(error);
+                }
+                delay = delay.min(timeout_ms - waited);
+            }
+            warn!("Request failed, retrying in {}ms: {}", delay, error);
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            waited += delay;
+            tries += 1;
+        }
+    };
+    if timeout_ms == 0 {
+        return attempts.await;
+    }
+    tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), attempts)
+        .await
+        .unwrap_or(Err(SDKError::Timeout(timeout_ms)))
+}
+
+/// Add the headers the JS SDK client sends on every request: `X-API-Key`,
+/// `X-Agent`, `X-Environment`, `X-Application`, `X-Application-Version`,
+/// `Content-Type`, plus `User-Agent` when an agent is configured.
+fn with_headers(request: reqwest::RequestBuilder, config: &SDKConfig) -> reqwest::RequestBuilder {
+    let agent = config.agent.as_deref().unwrap_or(DEFAULT_AGENT);
+    let mut request = request
+        .header("Content-Type", "application/json")
+        .header("X-API-Key", &config.api_key)
+        .header("X-Agent", agent)
+        .header("X-Application-Version", "0");
+    if !config.application.is_empty() {
+        request = request.header("X-Application", &config.application);
+    }
+    if !config.environment.is_empty() {
+        request = request.header("X-Environment", &config.environment);
+    }
+    if let Some(ref agent) = config.agent {
+        request = request.header("User-Agent", agent);
+    }
+    request
+}
+
+fn context_url(config: &SDKConfig) -> String {
+    format!(
+        "{}/context?application={}&environment={}",
+        config.endpoint.trim_end_matches('/'),
+        urlencoding::encode(&config.application),
+        urlencoding::encode(&config.environment)
+    )
+}
+
+/// `GET {endpoint}/context`, with the JS SDK client's headers and retries.
+pub(crate) async fn fetch_context(
+    client: &Client,
+    config: &SDKConfig,
+) -> Result<ContextData, SDKError> {
+    let url = context_url(config);
+    let resp = send_with_retry(config, || with_headers(client.get(&url), config)).await?;
+    Ok(resp.json().await?)
 }
 
 impl ABsmartly {
@@ -177,6 +333,11 @@ impl ABsmartly {
             .build()
     }
 
+    /// Fetch context data and create a ready context.
+    ///
+    /// Returns `Err` when the data cannot be fetched. Use
+    /// [`ABsmartly::create_context_or_failed`] to get a failed context instead,
+    /// with the cause in [`Context::ready_error`] and an `error` event.
     pub async fn create_context<I, K, V>(
         &self,
         units: I,
@@ -187,59 +348,38 @@ impl ABsmartly {
         K: Into<String>,
         V: Into<String>,
     {
-        let units_vec: Vec<(String, String)> = units
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect();
+        let units_vec = collect_units(units);
+        validate_units(&units_vec).map_err(SDKError::ConfigError)?;
+        let data = self.fetch_context_data().await?;
+        Ok(self.build_context(units_vec, Ok(data), options))
+    }
 
-        let url = format!(
-            "{}/context?application={}&environment={}",
-            self.config.endpoint.trim_end_matches('/'),
-            urlencoding::encode(&self.config.application),
-            urlencoding::encode(&self.config.environment)
-        );
+    /// Fetch context data and always return a context.
+    ///
+    /// When the fetch succeeds the context is ready and emits `ready`. When it
+    /// fails the context is failed: `is_failed()` is `true`, `ready_error()`
+    /// holds the cause, and the event logger receives an `error` event.
+    pub async fn create_context_or_failed<I, K, V>(
+        &self,
+        units: I,
+        options: Option<ContextOptions>,
+    ) -> Context
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let units_vec = collect_units(units);
+        // Invalid units are reported as such, before any network I/O.
+        let data = match validate_units(&units_vec) {
+            Err(e) => Err(e),
+            Ok(()) => self.fetch_context_data().await.map_err(|e| e.to_string()),
+        };
+        self.build_context(units_vec, data, options)
+    }
 
-        let mut retries = self.config.retries.unwrap_or(5);
-        let mut last_error = None;
-
-        while retries > 0 {
-            let response = self.client.get(&url).send().await;
-
-            match response {
-                Ok(resp) => {
-                    if resp.status().is_success() {
-                        let data: ContextData = resp.json().await?;
-                        return Ok(self.create_context_with_internal(units_vec, data, options));
-                    } else if resp.status().is_server_error() {
-                        retries -= 1;
-                        last_error = Some(SDKError::HttpError(
-                            resp.error_for_status().unwrap_err(),
-                        ));
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            50 * (2_u64.pow((self.config.retries.unwrap_or(5) - retries) as u32)),
-                        ))
-                        .await;
-                        continue;
-                    } else {
-                        return Err(SDKError::HttpError(resp.error_for_status().unwrap_err()));
-                    }
-                }
-                Err(e) => {
-                    retries -= 1;
-                    last_error = Some(SDKError::HttpError(e));
-                    if retries > 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            50 * (2_u64.pow((self.config.retries.unwrap_or(5) - retries) as u32)),
-                        ))
-                        .await;
-                    }
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| {
-            SDKError::ConfigError("Failed to create context after retries".to_string())
-        }))
+    async fn fetch_context_data(&self) -> Result<ContextData, SDKError> {
+        fetch_context(&self.client, &self.config).await
     }
 
     pub fn create_context_with<I, K, V>(
@@ -253,25 +393,122 @@ impl ABsmartly {
         K: Into<String>,
         V: Into<String>,
     {
-        let units_vec: Vec<(String, String)> = units
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect();
-        self.create_context_with_internal(units_vec, data, options)
+        self.build_context(collect_units(units), Ok(data), options)
     }
 
-    fn create_context_with_internal(
+    fn build_context(
         &self,
         units: Vec<(String, String)>,
-        data: ContextData,
-        _options: Option<ContextOptions>,
+        data: Result<ContextData, String>,
+        options: Option<ContextOptions>,
     ) -> Context {
-        let mut context = Context::new(data);
+        let mut context = Context::new_loading_with_options(options.unwrap_or_default());
+        // An invalid unit must not yield a usable context with a partial
+        // identity: the context is failed instead, with the cause attached.
+        let mut data = data;
         for (unit_type, uid) in units {
-            let _ = context.set_unit(&unit_type, &uid);
+            if let Err(e) = context.set_unit(&unit_type, &uid) {
+                warn!("Failed to set unit '{}': {}", unit_type, e);
+                data = Err(format!("Invalid unit '{}': {}", unit_type, e));
+            }
         }
+
+        context.set_publisher(Box::new(DefaultContextPublisher::from_config(
+            self.config.clone(),
+            self.client.clone(),
+        )));
+
+        let config = self.config.clone();
+        context.set_data_fetcher(Box::new(move || {
+            run_blocking(async {
+                let client = blocking_client(config.timeout_ms.unwrap_or(3000))?;
+                fetch_context(&client, &config)
+                    .await
+                    .map_err(|e| format!("Refresh fetch failed: {}", e))
+            })?
+        }));
+
+        // Resolve last, so the `ready`/`error` event reaches the logger only
+        // after units, publisher and fetcher are in place.
+        match data {
+            Ok(data) => context.become_ready(data),
+            Err(error) => context.become_failed_with_error(error),
+        }
+
         context
     }
+
+    pub async fn publish(&self, params: &PublishParams) -> Result<(), SDKError> {
+        send_publish(&self.client, &self.config, params).await
+    }
+}
+
+/// Run `fut` to completion from synchronous code on any kind of tokio runtime
+/// (current-thread, multi-thread, or none) without panicking or deadlocking.
+/// The future runs on a dedicated thread with its own runtime, so the caller's
+/// runtime is never asked to block.
+pub(crate) fn run_blocking<T, F>(fut: F) -> Result<T, String>
+where
+    T: Send,
+    F: std::future::Future<Output = T> + Send,
+{
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| format!("Failed to start runtime: {}", e))
+                    .map(|rt| rt.block_on(fut))
+            })
+            .join()
+            .map_err(|_| "Blocking task panicked".to_string())?
+    })
+}
+
+/// A client for use inside [`run_blocking`]; a client created on another
+/// runtime must not be reused because its pooled connections belong to it.
+pub(crate) fn blocking_client(timeout_ms: u64) -> Result<Client, String> {
+    Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+}
+
+/// Check units the way `Context::set_unit` does (blank or conflicting values).
+fn validate_units(units: &[(String, String)]) -> Result<(), String> {
+    let mut probe = Context::new_loading_with_options(ContextOptions::default());
+    for (unit_type, uid) in units {
+        probe
+            .set_unit(unit_type, uid)
+            .map_err(|e| format!("Invalid unit '{}': {}", unit_type, e))?;
+    }
+    Ok(())
+}
+
+fn collect_units<I, K, V>(units: I) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    units
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect()
+}
+
+/// Send `PUT {endpoint}/context` with the JS SDK client's headers and
+/// retries. Shared by [`ABsmartly::publish`] and the `DefaultContextPublisher`,
+/// so both send the same request.
+pub(crate) async fn send_publish(
+    client: &Client,
+    config: &SDKConfig,
+    params: &PublishParams,
+) -> Result<(), SDKError> {
+    let url = format!("{}/context", config.endpoint.trim_end_matches('/'));
+    send_with_retry(config, || with_headers(client.put(&url), config).json(params)).await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -280,7 +517,9 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_context_data() -> ContextData {
-        ContextData { experiments: vec![] }
+        ContextData {
+            experiments: vec![],
+        }
     }
 
     #[test]
@@ -363,7 +602,10 @@ mod tests {
         );
 
         assert_eq!(context.get_unit("session_id"), Some(&"user123".to_string()));
-        assert_eq!(context.get_unit("device_id"), Some(&"device456".to_string()));
+        assert_eq!(
+            context.get_unit("device_id"),
+            Some(&"device456".to_string())
+        );
     }
 
     #[test]
@@ -385,7 +627,10 @@ mod tests {
         let context = sdk.create_context_with(units, data, None);
 
         assert_eq!(context.get_unit("session_id"), Some(&"user123".to_string()));
-        assert_eq!(context.get_unit("device_id"), Some(&"device456".to_string()));
+        assert_eq!(
+            context.get_unit("device_id"),
+            Some(&"device456".to_string())
+        );
     }
 
     #[test]
@@ -406,7 +651,10 @@ mod tests {
         let context = sdk.create_context_with(units, data, None);
 
         assert_eq!(context.get_unit("session_id"), Some(&"user123".to_string()));
-        assert_eq!(context.get_unit("device_id"), Some(&"device456".to_string()));
+        assert_eq!(
+            context.get_unit("device_id"),
+            Some(&"device456".to_string())
+        );
     }
 
     #[test]
@@ -426,90 +674,6 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_missing_endpoint() {
-        let result = ABsmartly::builder()
-            .api_key("key")
-            .application("app")
-            .environment("env")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_missing_api_key() {
-        let result = ABsmartly::builder()
-            .endpoint("endpoint")
-            .application("app")
-            .environment("env")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_missing_application() {
-        let result = ABsmartly::builder()
-            .endpoint("endpoint")
-            .api_key("key")
-            .environment("env")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_missing_environment() {
-        let result = ABsmartly::builder()
-            .endpoint("endpoint")
-            .api_key("key")
-            .application("app")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_empty_endpoint() {
-        let result = ABsmartly::builder()
-            .endpoint("")
-            .api_key("key")
-            .application("app")
-            .environment("env")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_empty_api_key() {
-        let result = ABsmartly::builder()
-            .endpoint("endpoint")
-            .api_key("")
-            .application("app")
-            .environment("env")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_empty_application() {
-        let result = ABsmartly::builder()
-            .endpoint("endpoint")
-            .api_key("key")
-            .application("")
-            .environment("env")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_empty_environment() {
-        let result = ABsmartly::builder()
-            .endpoint("endpoint")
-            .api_key("key")
-            .application("app")
-            .environment("")
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_sdk_config_new() {
         let config = SDKConfig::new("endpoint", "key", "app", "env");
         assert_eq!(config.endpoint, "endpoint");
@@ -523,22 +687,19 @@ mod tests {
 
     #[test]
     fn test_sdk_config_with_agent() {
-        let config = SDKConfig::new("endpoint", "key", "app", "env")
-            .with_agent("test-agent");
+        let config = SDKConfig::new("endpoint", "key", "app", "env").with_agent("test-agent");
         assert_eq!(config.agent, Some("test-agent".to_string()));
     }
 
     #[test]
     fn test_sdk_config_with_timeout() {
-        let config = SDKConfig::new("endpoint", "key", "app", "env")
-            .with_timeout(5000);
+        let config = SDKConfig::new("endpoint", "key", "app", "env").with_timeout(5000);
         assert_eq!(config.timeout_ms, Some(5000));
     }
 
     #[test]
     fn test_sdk_config_with_retries() {
-        let config = SDKConfig::new("endpoint", "key", "app", "env")
-            .with_retries(10);
+        let config = SDKConfig::new("endpoint", "key", "app", "env").with_retries(10);
         assert_eq!(config.retries, Some(10));
     }
 
@@ -624,5 +785,54 @@ mod tests {
     fn test_sdk_error_display() {
         let err = SDKError::ConfigError("test error".to_string());
         assert_eq!(format!("{}", err), "Invalid configuration: test error");
+    }
+
+    #[test]
+    fn test_retry_delay_ms_calculation() {
+        assert_eq!(retry_delay_ms(0), 50);
+        assert_eq!(retry_delay_ms(1), 100);
+        assert_eq!(retry_delay_ms(2), 200);
+        assert_eq!(retry_delay_ms(3), 400);
+        assert_eq!(retry_delay_ms(4), 800);
+    }
+
+    #[test]
+    fn test_retry_delay_ms_caps_at_10() {
+        assert_eq!(retry_delay_ms(10), retry_delay_ms(11));
+    }
+
+    #[test]
+    fn test_builder_empty_fields_rejected() {
+        assert!(ABsmartly::builder()
+            .endpoint("")
+            .api_key("key")
+            .application("app")
+            .environment("env")
+            .build()
+            .is_err());
+
+        assert!(ABsmartly::builder()
+            .endpoint("endpoint")
+            .api_key("")
+            .application("app")
+            .environment("env")
+            .build()
+            .is_err());
+
+        assert!(ABsmartly::builder()
+            .endpoint("endpoint")
+            .api_key("key")
+            .application("")
+            .environment("env")
+            .build()
+            .is_err());
+
+        assert!(ABsmartly::builder()
+            .endpoint("endpoint")
+            .api_key("key")
+            .application("app")
+            .environment("")
+            .build()
+            .is_err());
     }
 }

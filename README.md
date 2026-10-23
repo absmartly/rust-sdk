@@ -1,4 +1,4 @@
-# ABsmartly SDK for Rust
+# ABsmartly Rust SDK
 
 [![Crates.io](https://img.shields.io/crates/v/absmartly-sdk.svg)](https://crates.io/crates/absmartly-sdk)
 [![Documentation](https://docs.rs/absmartly-sdk/badge.svg)](https://docs.rs/absmartly-sdk)
@@ -8,7 +8,9 @@ A Rust SDK for [ABsmartly](https://www.absmartly.com) - A/B testing and feature 
 
 ## Compatibility
 
-The ABsmartly Rust SDK is compatible with Rust 2021 edition and later. It provides a synchronous interface for variant assignment and goal tracking.
+**0.2.0 is a breaking release** (minor bump under 0.x semver): `ContextOptions` gained an `event_logger` field (construct it with `..Default::default()`), and `Context::refresh()` is now the fetch-based refresh (use `refresh_with(data)` to apply data you already have). `SDK::new(SDKConfig)`, `set_event_logger(Box<..>)`, the `in` operator order and `refresh_with` returning `()` are unchanged from 0.1.
+
+The ABsmartly Rust SDK is compatible with Rust 2021 edition and later. It uses async/await with [tokio](https://tokio.rs/) for network operations and provides a synchronous interface for variant assignment and goal tracking.
 
 ## Installation
 
@@ -16,7 +18,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-absmartly-sdk = "0.1"
+absmartly-sdk = "0.2"
 ```
 
 ## Getting Started
@@ -27,7 +29,7 @@ Please follow the [installation](#installation) instructions before trying the f
 
 This example assumes an API Key, an Application, and an Environment have been created in the ABsmartly web console.
 
-**Using the builder pattern (recommended):**
+#### Recommended: Builder Pattern
 
 ```rust
 use absmartly_sdk::ABsmartly;
@@ -40,7 +42,23 @@ let sdk = ABsmartly::builder()
     .build()?;
 ```
 
-**Using positional parameters:**
+#### With Optional Parameters
+
+```rust
+use absmartly_sdk::ABsmartly;
+
+let sdk = ABsmartly::builder()
+    .endpoint("https://your-company.absmartly.io/v1")
+    .api_key("YOUR-API-KEY")
+    .application("website")
+    .environment("development")
+    .timeout(5000)      // connection timeout in milliseconds
+    .retries(3)         // max retry attempts
+    .agent("my-agent")  // custom user agent string
+    .build()?;
+```
+
+#### Positional Parameters
 
 ```rust
 use absmartly_sdk::ABsmartly;
@@ -53,27 +71,11 @@ let sdk = ABsmartly::new(
 )?;
 ```
 
-**Advanced configuration:**
-
-```rust
-use absmartly_sdk::ABsmartly;
-
-let sdk = ABsmartly::builder()
-    .endpoint("https://your-company.absmartly.io/v1")
-    .api_key("YOUR-API-KEY")
-    .application("website")
-    .environment("development")
-    .timeout(5000)
-    .retries(3)
-    .agent("my-agent")
-    .build()?;
-```
-
 **SDK Options**
 
 | Config                  | Type                              | Required? |   Default   | Description                                                                                                                                                                   |
 | :---------------------- | :-------------------------------- | :-------: | :---------: | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| endpoint                | `String`                          |  &#9989;  | `""`        | The URL to your API endpoint. Most commonly `"your-company.absmartly.io"`                                                                                                     |
+| endpoint                | `String`                          |  &#9989;  | `""`        | The URL to your API endpoint. Most commonly `"https://your-company.absmartly.io/v1"`                                                                                          |
 | api_key                 | `String`                          |  &#9989;  | `""`        | Your API key which can be found on the Web Console.                                                                                                                           |
 | environment             | `String`                          |  &#9989;  | `""`        | The environment of the platform where the SDK is installed. Environments are created on the Web Console and should match the available environments in your infrastructure.   |
 | application             | `String`                          |  &#9989;  | `""`        | The name of the application where the SDK is installed. Applications are created on the Web Console and should match the applications where your experiments will be running. |
@@ -81,7 +83,9 @@ let sdk = ABsmartly::builder()
 | timeout_ms              | `u64`                             |  &#10060; | `3000`      | Connection timeout in milliseconds                                                                                                                                            |
 | agent                   | `Option<String>`                  |  &#10060; | `None`      | Custom user agent string                                                                                                                                                      |
 
-### Creating a New Context
+## Creating a New Context
+
+### With Async Network Fetch
 
 ```rust
 use absmartly_sdk::ABsmartly;
@@ -93,14 +97,21 @@ let sdk = ABsmartly::new(
     "development",
 )?;
 
-// Define units for the context - accepts arrays of tuples (no .to_string() needed!)
 let units = [("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")];
 
-// Create context (it will be ready immediately after creation)
 let mut context = sdk.create_context(units, None).await?;
 ```
 
-### Creating a New Context with Pre-fetched Data
+`create_context()` returns `Err` when the context data cannot be fetched. If you prefer a context in every case, use `create_context_or_failed()`. When the fetch fails, it returns a failed context: `is_failed()` is `true`, `ready_error()` holds the cause, and the event logger receives an `error` event. A failed context returns control variants and default values, and it discards its events on publish.
+
+```rust
+let context = sdk.create_context_or_failed(units, None).await;
+if let Some(error) = context.ready_error() {
+    eprintln!("ABsmartly context failed to load: {}", error);
+}
+```
+
+### With Pre-fetched Data
 
 When doing full-stack experimentation with ABsmartly, we recommend creating a context only once on the server-side. Creating a context involves a round-trip to the ABsmartly event collector. We can avoid repeating the round-trip on the client-side by sending the server-side data embedded in the first document.
 
@@ -114,15 +125,12 @@ let sdk = ABsmartly::new(
     "development",
 )?;
 
-// Define units for the context
 let units = [("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")];
 
-// Load context data from ABsmartly API (you'll need to fetch this from your backend)
 let context_data: ContextData = serde_json::from_str(&api_response)?;
 
-// Create context with pre-fetched data - no network round-trip needed
 let mut context = sdk.create_context_with(units, context_data, None);
-assert!(context.is_ready()); // Context is immediately ready
+assert!(context.is_ready());
 ```
 
 ### Refreshing the Context with Fresh Experiment Data
@@ -130,14 +138,12 @@ assert!(context.is_ready()); // Context is immediately ready
 For long-running contexts, the context can be refreshed manually with updated experiment data:
 
 ```rust
-// Fetch fresh context data from your backend
 let fresh_data: ContextData = serde_json::from_str(&api_response)?;
 
-// Refresh the context with new data
-context.refresh(fresh_data);
+context.refresh_with(fresh_data);
 ```
 
-### Setting Extra Units for a Context
+### Setting Extra Units
 
 You can add additional units to a context by calling the `set_unit()` method. This method may be used, for example, when a user logs in to your application, and you want to use the new unit type in the context.
 
@@ -146,30 +152,13 @@ You can add additional units to a context by calling the `set_unit()` method. Th
 ```rust
 context.set_unit("db_user_id", "1000013")?;
 
-// Or set multiple units at once
 context.set_units([
     ("db_user_id", "1000013"),
     ("user_type", "premium"),
 ])?;
 ```
 
-### Setting Context Attributes
-
-Attributes are used for audience targeting. The `set_attribute()` method can be called before the context is ready. It accepts native Rust types directly:
-
-```rust
-// Accepts native Rust types - no json!() macro needed!
-context.set_attribute("user_agent", "Mozilla/5.0")?;
-context.set_attribute("customer_age", "new_customer")?;
-context.set_attribute("age", 25)?;
-context.set_attribute("premium", true)?;
-
-// Or set multiple attributes at once
-context.set_attributes([
-    ("user_agent", "Mozilla/5.0"),
-    ("customer_age", "new_customer"),
-])?;
-```
+## Basic Usage
 
 ### Selecting a Treatment
 
@@ -185,41 +174,17 @@ if variant == 0 {
 }
 ```
 
-### Tracking a Goal Achievement
+### Treatment Variables
 
-Goals are created in the ABsmartly web console.
-
-```rust
-use serde_json::json;
-
-// Track a simple goal (use () for no properties)
-context.track("payment", ())?;
-
-// Track a goal with properties using json!()
-context.track("purchase", json!({
-    "item_count": 1,
-    "total_amount": 1999.99
-}))?;
-```
-
-### Publishing Pending Data
-
-Sometimes it is necessary to ensure all events have been published to the ABsmartly collector before proceeding. You can explicitly call the `publish()` method.
+Get configuration values from experiments. Variables allow you to configure different values for each variant.
 
 ```rust
-context.publish();
+let button_color = context.variable_value("button.color", "blue");
+println!("Button color: {}", button_color);
+
+let show_banner = context.variable_value("banner.show", false);
+let max_items = context.variable_value("cart.max_items", 10);
 ```
-
-### Finalizing
-
-The `finalize()` method will ensure all events have been published to the ABsmartly collector, like `publish()`, and will also "seal" the context, preventing any further events from being tracked.
-
-```rust
-context.finalize();
-// Context is now sealed - no more treatments or goals can be tracked
-```
-
-## Basic Usage
 
 ### Peek at Treatment Variants
 
@@ -235,9 +200,7 @@ if variant == 0 {
 }
 ```
 
-### Peeking at Variables
-
-You can peek at variable values without triggering an exposure.
+#### Peeking at Variables
 
 ```rust
 let button_color = context.peek_variable_value("button.color", "red");
@@ -245,13 +208,33 @@ let button_color = context.peek_variable_value("button.color", "red");
 
 ### Overriding Treatment Variants
 
-During development, for example, it is useful to force a treatment for an experiment. This can be achieved with the `set_override()` method.
+During development, for example, it is useful to force a treatment for an experiment. This can be achieved with the `set_override()` method. The `set_override()` and `set_overrides()` methods can be called before the context is ready.
 
 ```rust
-context.set_override("exp_test_experiment", 1); // Force variant 1
+context.set_override("exp_test_experiment", 1)?; // Force variant 1
 
-// You can also set multiple overrides
-context.set_override("exp_another_experiment", 0);
+context.set_overrides([
+    ("exp_test_experiment", 1),
+    ("exp_another_experiment", 0),
+])?;
+```
+
+## Advanced
+
+### Context Attributes
+
+Attributes are used to pass meta-data about the user and/or the request. They can be used later in the Web Console to create segments or audiences. The `set_attribute()` method can be called before the context is ready. It accepts native Rust types directly:
+
+```rust
+context.set_attribute("user_agent", "Mozilla/5.0")?;
+context.set_attribute("customer_age", "new_customer")?;
+context.set_attribute("age", 25)?;
+context.set_attribute("premium", true)?;
+
+context.set_attributes([
+    ("user_agent", "Mozilla/5.0"),
+    ("customer_age", "new_customer"),
+])?;
 ```
 
 ### Custom Assignments
@@ -261,115 +244,105 @@ Custom assignments allow you to set a specific variant for an experiment program
 ```rust
 context.set_custom_assignment("exp_test_experiment", 1)?;
 
-// Or set multiple custom assignments at once
 context.set_custom_assignments([
     ("exp_test_experiment", 1),
     ("exp_another_experiment", 0),
 ])?;
 ```
 
-## Variable Values
+### Tracking Goals
 
-Get configuration values from experiments. Variables allow you to configure different values for each variant.
+Goals are created in the ABsmartly web console.
 
 ```rust
-// Get a variable value with a default fallback
-// Accepts native Rust types - no json!() macro needed!
-let button_color = context.variable_value("button.color", "blue");
-println!("Button color: {}", button_color);
+use serde_json::json;
 
-// Get other types of variables
-let show_banner = context.variable_value("banner.show", false);
-let max_items = context.variable_value("cart.max_items", 10);
+context.track("payment", ())?;
+
+context.track("purchase", json!({
+    "item_count": 1,
+    "total_amount": 1999.99
+}))?;
 ```
 
-## Custom Event Logger
+### Publishing Pending Data
 
-You can implement a custom event logger to handle SDK events. This is useful for debugging, analytics, or integrating with other systems.
+Sometimes it is necessary to ensure all events have been published to the ABsmartly collector before proceeding. You can explicitly call the `publish()` method.
 
 ```rust
-use absmartly_sdk::{EventLogger, EventType, Context};
+context.publish()?;
+```
 
-struct CustomEventLogger;
+`publish()` returns `Err` when the collector does not accept the events. The events then stay pending, so a later `publish()` sends them again, and the event logger receives an `error` event.
 
-impl EventLogger for CustomEventLogger {
-    fn handle_event(&self, context: &Context, event: EventType, data: &dyn std::any::Any) {
-        match event {
-            EventType::Exposure => {
-                if let Some(exposure) = data.downcast_ref::<Exposure>() {
-                    println!("Exposed to experiment: {}", exposure.name);
-                }
-            }
-            EventType::Goal => {
-                if let Some(goal) = data.downcast_ref::<GoalAchievement>() {
-                    println!("Goal tracked: {}", goal.name);
-                }
-            }
-            EventType::Error => {
-                if let Some(error) = data.downcast_ref::<SDKError>() {
-                    eprintln!("Error: {:?}", error);
-                }
-            }
-            EventType::Ready | EventType::Refresh | EventType::Publish | EventType::Close => {
-                // Handle other events as needed
-            }
-        }
+On a multi-thread tokio runtime the default publisher waits for the collector's response. A current-thread runtime cannot block, so there the request is sent in the background: `publish()` returns `Ok(())` before the response arrives, and a failure is only logged. To get the result on a current-thread runtime, call `sdk.publish(&context.get_publish_params()).await` yourself.
+
+### Finalizing
+
+The `finalize()` method will ensure all events have been published to the ABsmartly collector, like `publish()`, and will also "seal" the context, preventing any further events from being tracked.
+
+```rust
+context.finalize()?;
+```
+
+If the publish fails, `finalize()` returns `Err` and the context stays open with its events pending, so you can call `finalize()` again.
+
+### Custom Event Logger
+
+You can set a custom event logger to handle SDK events. This is useful for debugging, analytics, or integrating with other systems.
+
+```rust
+context.set_event_logger(Box::new(|ctx, event_type, data| {
+    match event_type {
+        "exposure" => println!("Exposure event"),
+        "goal" => println!("Goal tracked"),
+        "error" => eprintln!("Error: {:?}", data),
+        "ready" | "refresh" | "publish" | "finalize" => {}
+        _ => {}
     }
-}
+}));
+```
 
-// Usage with custom event logger requires SDKConfig
-let config = SDKConfig::new(
-    "https://your-company.absmartly.io/v1",
-    "YOUR-API-KEY",
-    "website",
-    "development",
-);
-// Note: event_logger support coming soon
+To receive the `ready` event (or the `error` event of a failed load), give the logger in `ContextOptions` when you create the context. A logger set later with `set_event_logger()` only receives the events that come after it.
 
-let sdk = ABsmartly::from_config(config)?;
+```rust
+let options = ContextOptions {
+    event_logger: Some(Arc::new(|_ctx, event_type, data| {
+        println!("{}: {:?}", event_type, data);
+    })),
+    ..Default::default()
+};
+let mut context = sdk.create_context(units, Some(options)).await?;
 ```
 
 **Event Types**
 
 | Event      | When                                               | Data                                   |
 | ---------- | -------------------------------------------------- | -------------------------------------- |
-| `Error`    | Context receives an error                          | `SDKError`                             |
-| `Ready`    | Context turns ready                                | `ContextData` used to initialize       |
-| `Refresh`  | `refresh()` method succeeds                        | `ContextData` used to refresh          |
-| `Publish`  | `publish()` method succeeds                        | `PublishEvent` sent to collector       |
-| `Exposure` | `treatment()` succeeds on first exposure           | `Exposure` enqueued for publishing     |
-| `Goal`     | `track()` method succeeds                          | `GoalAchievement` enqueued for publishing |
-| `Close`    | `finalize()` method succeeds the first time        | `()`                                   |
+| `error`    | Data load, `publish()` or `refresh()` fails        | `{"message": "<error>"}`               |
+| `ready`    | Context turns ready                                | `ContextData` used to initialize       |
+| `refresh`  | `refresh()` method succeeds                        | `ContextData` used to refresh          |
+| `publish`  | `publish()` method succeeds                        | `PublishParams` sent to collector      |
+| `exposure` | `treatment()` succeeds on first exposure           | `Exposure` enqueued for publishing     |
+| `goal`     | `track()` method succeeds                          | `Goal` enqueued for publishing         |
+| `finalize` | `finalize()` method succeeds the first time        | `None`                                 |
 
-## Advanced Usage
+### Error Handling
 
-### Getting Experiment Data
-
-You can retrieve information about experiments in the current context.
+The SDK uses Rust's `Result` type for error handling:
 
 ```rust
-// Get all experiment names
-let experiments = context.get_experiments();
-for name in experiments {
-    println!("Experiment: {}", name);
-}
+use absmartly_sdk::SDKError;
 
-// Get custom field value for an experiment
-if let Some(value) = context.get_custom_field_value("exp_test", "analyst") {
-    println!("Analyst: {}", value);
+match context.set_unit("user_id", "12345") {
+    Ok(_) => println!("Unit set successfully"),
+    Err(msg) => println!("Error: {}", msg),
 }
 ```
 
-### Checking Variable Keys
+### Thread Safety
 
-You can get all variable keys for an experiment.
-
-```rust
-let keys = context.variable_keys();
-for key in keys {
-    println!("Variable key: {}", key);
-}
-```
+The Context is designed for single-threaded use. If you need to use it across threads, wrap it in appropriate synchronization primitives like `Arc<Mutex<Context>>`.
 
 ## Platform-Specific Examples
 
@@ -407,10 +380,10 @@ async fn main() {
         .route("/", get(handler))
         .with_state(state);
 
-    axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
-        .serve(app.into_make_service())
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
         .await
         .unwrap();
+    axum::serve(listener, app).await.unwrap();
 }
 
 async fn handler(State(state): State<AppState>) -> Html<String> {
@@ -423,7 +396,9 @@ async fn handler(State(state): State<AppState>) -> Html<String> {
 
     let treatment = context.treatment("exp_test_experiment");
 
-    context.finalize();
+    if let Err(e) = context.finalize() {
+        eprintln!("ABsmartly finalize failed: {}", e);
+    }
 
     if treatment == 0 {
         Html("<h1>Control Group</h1>".to_string())
@@ -455,7 +430,9 @@ async fn index(data: web::Data<AppState>) -> HttpResponse {
 
     let treatment = context.treatment("exp_test_experiment");
 
-    context.finalize();
+    if let Err(e) = context.finalize() {
+        eprintln!("ABsmartly finalize failed: {}", e);
+    }
 
     if treatment == 0 {
         HttpResponse::Ok().body("<h1>Control Group</h1>")
@@ -505,7 +482,9 @@ async fn index(sdk: &State<Arc<ABsmartly>>) -> String {
 
     let treatment = context.treatment("exp_test_experiment");
 
-    context.finalize();
+    if let Err(e) = context.finalize() {
+        eprintln!("ABsmartly finalize failed: {}", e);
+    }
 
     if treatment == 0 {
         String::from("<h1>Control Group</h1>")
@@ -532,95 +511,6 @@ async fn main() {
 }
 ```
 
-## Advanced Request Configuration
-
-### Request Timeout with Tokio
-
-```rust
-use absmartly_sdk::{ABsmartly, Context};
-use tokio::time::{timeout, Duration};
-
-async fn create_context_with_timeout(
-    sdk: &ABsmartly
-) -> Result<Context, Box<dyn std::error::Error>> {
-    let units = [("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")];
-
-    let context = timeout(
-        Duration::from_millis(1500),
-        sdk.create_context(units, None)
-    ).await??;
-
-    Ok(context)
-}
-```
-
-### Request Cancellation with Tokio
-
-```rust
-use absmartly_sdk::ABsmartly;
-use tokio::select;
-use tokio::sync::oneshot;
-
-async fn create_context_with_cancellation(sdk: &ABsmartly) {
-    let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
-
-    let units = [("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")];
-
-    select! {
-        result = sdk.create_context(units, None) => {
-            match result {
-                Ok(context) => println!("Context ready"),
-                Err(e) => eprintln!("Context creation failed: {:?}", e),
-            }
-        }
-        _ = cancel_rx => {
-            println!("Context creation cancelled");
-        }
-    }
-
-    // To cancel: drop(cancel_tx) or cancel_tx.send(()).ok();
-}
-```
-
-## Context Data Structure
-
-The SDK expects context data in the following format (typically fetched from the ABsmartly API):
-
-```rust
-use absmartly_sdk::ContextData;
-
-let context_data = ContextData {
-    experiments: vec![
-        // Experiment configurations from ABsmartly API
-    ],
-};
-```
-
-## Error Handling
-
-The SDK uses Rust's `Result` type for error handling:
-
-```rust
-use absmartly_sdk::SDKError;
-
-match context.set_unit("user_id", "12345") {
-    Ok(_) => println!("Unit set successfully"),
-    Err(SDKError::UnitAlreadySet(unit_type)) => {
-        println!("Cannot override unit type: {}", unit_type);
-    }
-    Err(e) => println!("Error: {:?}", e),
-}
-```
-
-## Thread Safety
-
-The Context is designed for single-threaded use. If you need to use it across threads, wrap it in appropriate synchronization primitives like `Arc<Mutex<Context>>`.
-
-## Documentation
-
-- [API Documentation](https://docs.rs/absmartly-sdk)
-- [ABsmartly Documentation](https://docs.absmartly.com)
-
 ## About A/B Smartly
 
 **A/B Smartly** is the leading provider of state-of-the-art, on-premises, full-stack experimentation platforms for engineering and product teams that want to confidently deploy features as fast as they can develop them.
@@ -642,8 +532,4 @@ A/B Smartly's real-time analytics helps engineering and product teams ensure tha
 - [.NET SDK](https://www.github.com/absmartly/dotnet-sdk)
 - [Dart SDK](https://www.github.com/absmartly/dart-sdk)
 - [Flutter SDK](https://www.github.com/absmartly/flutter-sdk)
-- [Rust SDK](https://www.github.com/absmartly/rust-sdk)
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+- [Rust SDK](https://www.github.com/absmartly/rust-sdk) (this package)
