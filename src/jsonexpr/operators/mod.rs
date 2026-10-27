@@ -65,11 +65,7 @@ pub fn not_op(evaluator: &Evaluator, args: &Value) -> Value {
 
 /// Evaluate a binary operator's two operands. Null (and `op` is not called)
 /// when the arguments are not an array or either operand evaluates to null.
-fn binary(
-    evaluator: &Evaluator,
-    args: &Value,
-    op: impl FnOnce(&Value, &Value) -> Value,
-) -> Value {
+fn binary(evaluator: &Evaluator, args: &Value, op: impl FnOnce(&Value, &Value) -> Value) -> Value {
     let Value::Array(arr) = args else {
         return Value::Null;
     };
@@ -129,9 +125,10 @@ pub fn contains_op(evaluator: &Evaluator, args: &Value) -> Value {
 /// cannot be converted or the pattern is not a valid regex.
 pub fn match_op(evaluator: &Evaluator, args: &Value) -> Value {
     binary(evaluator, args, |text, pattern| {
-        let (Some(text), Some(pattern)) =
-            (evaluator.string_convert(text), evaluator.string_convert(pattern))
-        else {
+        let (Some(text), Some(pattern)) = (
+            evaluator.string_convert(text),
+            evaluator.string_convert(pattern),
+        ) else {
             return Value::Null;
         };
         match RegexBuilder::new(&pattern)
@@ -544,7 +541,10 @@ mod tests {
     #[test]
     fn test_in_op_non_collection_haystack_is_null() {
         let evaluator = make_evaluator();
-        assert_eq!(in_op(&evaluator, &json!([{"value": 5}, {"value": 5}])), Value::Null);
+        assert_eq!(
+            in_op(&evaluator, &json!([{"value": 5}, {"value": 5}])),
+            Value::Null
+        );
         assert_eq!(
             in_op(&evaluator, &json!([{"value": true}, {"value": true}])),
             Value::Null
@@ -595,9 +595,24 @@ mod tests {
     #[test]
     fn test_binary_operators_null_operand_is_null() {
         let evaluator = make_evaluator();
-        for op in [eq_op, gt_op, gte_op, lt_op, lte_op, match_op, in_op, contains_op] {
-            assert_eq!(op(&evaluator, &json!([{"value": null}, {"value": 1}])), Value::Null);
-            assert_eq!(op(&evaluator, &json!([{"value": "1"}, {"value": null}])), Value::Null);
+        for op in [
+            eq_op,
+            gt_op,
+            gte_op,
+            lt_op,
+            lte_op,
+            match_op,
+            in_op,
+            contains_op,
+        ] {
+            assert_eq!(
+                op(&evaluator, &json!([{"value": null}, {"value": 1}])),
+                Value::Null
+            );
+            assert_eq!(
+                op(&evaluator, &json!([{"value": "1"}, {"value": null}])),
+                Value::Null
+            );
             assert_eq!(op(&evaluator, &json!([{"value": "1"}])), Value::Null);
             assert_eq!(op(&evaluator, &json!("1")), Value::Null);
         }

@@ -95,7 +95,10 @@ mod tests {
         assert_eq!(hash_unit_value(&json!(-0.2)), Some(hash_unit("0")));
         assert_eq!(hash_unit_value(&json!("abc")), Some(hash_unit("abc")));
         assert_eq!(hash_unit_value(&json!(true)), None);
-        assert_eq!(hash_unit_value(&json!(12345)), Some("gnzLDuqKcGxMNKFokfhOew".to_string()));
+        assert_eq!(
+            hash_unit_value(&json!(12345)),
+            Some("gnzLDuqKcGxMNKFokfhOew".to_string())
+        );
     }
 
     #[test]
@@ -189,7 +192,8 @@ mod tests {
     fn test_assign_utf8_units() {
         use crate::assigner::VariantAssigner;
         let split = [0.5, 0.5];
-        for (unit, expected) in [("😀", 1), ("🇵🇹", 0), ("a€𝄞z", 1), ("user😀id", 0)] {
+        for (unit, expected) in [("😀", 1), ("🇵🇹", 0), ("a€𝄞z", 1), ("user😀id", 0)]
+        {
             let assigner = VariantAssigner::new(&hash_unit(unit));
             assert_eq!(
                 assigner.assign(&split, 3603583, 233373918),

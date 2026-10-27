@@ -256,7 +256,10 @@ async fn create_context_or_failed_returns_failed_context_with_error_event() {
     assert!(context.is_ready());
     let ready_error = context.ready_error().expect("ready_error is set");
     assert!(ready_error.contains("404"), "got: {}", ready_error);
-    assert_eq!(context.get_unit("session_id"), Some(&serde_json::json!("user-1")));
+    assert_eq!(
+        context.get_unit("session_id"),
+        Some(&serde_json::json!("user-1"))
+    );
 
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);

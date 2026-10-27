@@ -507,7 +507,10 @@ pub(crate) async fn send_publish(
     params: &PublishParams,
 ) -> Result<(), SDKError> {
     let url = format!("{}/context", config.endpoint.trim_end_matches('/'));
-    send_with_retry(config, || with_headers(client.put(&url), config).json(params)).await?;
+    send_with_retry(config, || {
+        with_headers(client.put(&url), config).json(params)
+    })
+    .await?;
     Ok(())
 }
 
@@ -601,7 +604,10 @@ mod tests {
             None,
         );
 
-        assert_eq!(context.get_unit("session_id"), Some(&serde_json::json!("user123")));
+        assert_eq!(
+            context.get_unit("session_id"),
+            Some(&serde_json::json!("user123"))
+        );
         assert_eq!(
             context.get_unit("device_id"),
             Some(&serde_json::json!("device456"))
@@ -626,7 +632,10 @@ mod tests {
 
         let context = sdk.create_context_with(units, data, None);
 
-        assert_eq!(context.get_unit("session_id"), Some(&serde_json::json!("user123")));
+        assert_eq!(
+            context.get_unit("session_id"),
+            Some(&serde_json::json!("user123"))
+        );
         assert_eq!(
             context.get_unit("device_id"),
             Some(&serde_json::json!("device456"))
@@ -650,7 +659,10 @@ mod tests {
 
         let context = sdk.create_context_with(units, data, None);
 
-        assert_eq!(context.get_unit("session_id"), Some(&serde_json::json!("user123")));
+        assert_eq!(
+            context.get_unit("session_id"),
+            Some(&serde_json::json!("user123"))
+        );
         assert_eq!(
             context.get_unit("device_id"),
             Some(&serde_json::json!("device456"))
@@ -670,7 +682,10 @@ mod tests {
 
         let context = sdk.create_context_with([("session_id", "user123")], data, None);
 
-        assert_eq!(context.get_unit("session_id"), Some(&serde_json::json!("user123")));
+        assert_eq!(
+            context.get_unit("session_id"),
+            Some(&serde_json::json!("user123"))
+        );
     }
 
     #[test]

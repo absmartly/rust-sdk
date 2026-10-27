@@ -268,7 +268,12 @@ impl Context {
                 Value::String(trimmed.to_string())
             }
             Value::Number(n) => Value::Number(n),
-            _ => return Err(format!("Unit '{}' must be a string or a number.", unit_type)),
+            _ => {
+                return Err(format!(
+                    "Unit '{}' must be a string or a number.",
+                    unit_type
+                ))
+            }
         };
 
         if let Some(existing) = self.units.get(unit_type) {
@@ -510,7 +515,11 @@ impl Context {
         Ok(self.custom_field_value_unchecked(experiment_name, field_name))
     }
 
-    fn custom_field_value_unchecked(&self, experiment_name: &str, field_name: &str) -> Option<Value> {
+    fn custom_field_value_unchecked(
+        &self,
+        experiment_name: &str,
+        field_name: &str,
+    ) -> Option<Value> {
         if let Some(exp) = self.index.get(experiment_name) {
             if let Some(ref custom_fields) = exp.data.custom_field_values {
                 if let Some(field) = custom_fields.iter().find(|f| f.name == field_name) {
@@ -1108,7 +1117,10 @@ mod tests {
         let mut context = Context::new(data);
 
         assert!(context.set_unit("session_id", "user123").is_ok());
-        assert_eq!(context.get_unit("session_id"), Some(&serde_json::json!("user123")));
+        assert_eq!(
+            context.get_unit("session_id"),
+            Some(&serde_json::json!("user123"))
+        );
     }
 
     #[test]
@@ -1337,7 +1349,9 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut context = Context::new(data);
 
-        let value = context.variable_value("nonexistent", json!("default")).unwrap();
+        let value = context
+            .variable_value("nonexistent", json!("default"))
+            .unwrap();
         assert_eq!(value, json!("default"));
     }
 
@@ -1346,7 +1360,9 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut context = Context::new(data);
 
-        let value = context.peek_variable_value("nonexistent", json!(42)).unwrap();
+        let value = context
+            .peek_variable_value("nonexistent", json!(42))
+            .unwrap();
         assert_eq!(value, json!(42));
     }
 
@@ -1492,7 +1508,9 @@ mod tests {
         let data = make_context_data(vec![]);
         let mut context = Context::new(data);
 
-        let value = context.variable_value("nonexistent", "default_value").unwrap();
+        let value = context
+            .variable_value("nonexistent", "default_value")
+            .unwrap();
         assert_eq!(value, json!("default_value"));
     }
 
@@ -1635,7 +1653,10 @@ mod tests {
         vec![
             ("peek", ctx.peek("exp").map(|_| ())),
             ("treatment", ctx.treatment("exp").map(|_| ())),
-            ("variable_value", ctx.variable_value("color", "x").map(|_| ())),
+            (
+                "variable_value",
+                ctx.variable_value("color", "x").map(|_| ()),
+            ),
             (
                 "peek_variable_value",
                 ctx.peek_variable_value("color", "x").map(|_| ()),
@@ -1754,9 +1775,17 @@ mod tests {
             Ok(())
         );
 
-        assert_eq!(*fetches.lock().unwrap(), 0, "a failed context does not fetch");
+        assert_eq!(
+            *fetches.lock().unwrap(),
+            0,
+            "a failed context does not fetch"
+        );
         assert!(ctx.is_failed());
-        assert_eq!(ctx.experiments(), Ok(vec![]), "a failed context is not recovered");
+        assert_eq!(
+            ctx.experiments(),
+            Ok(vec![]),
+            "a failed context is not recovered"
+        );
         assert!(log.lock().unwrap().is_empty(), "no refresh or error event");
     }
 
@@ -1782,7 +1811,9 @@ mod tests {
         assert_eq!(log[0].event, "error");
         assert_eq!(
             log[0].data,
-            Some(json!({"message": "Discarding 0 exposures and 1 goals because context failed to initialize"}))
+            Some(
+                json!({"message": "Discarding 0 exposures and 1 goals because context failed to initialize"})
+            )
         );
     }
 
@@ -1925,7 +1956,10 @@ mod tests {
     fn test_set_unit_callable_before_ready() {
         let mut ctx = Context::new_loading();
         assert!(ctx.set_unit("session_id", "user123").is_ok());
-        assert_eq!(ctx.get_unit("session_id"), Some(&serde_json::json!("user123")));
+        assert_eq!(
+            ctx.get_unit("session_id"),
+            Some(&serde_json::json!("user123"))
+        );
     }
 
     #[test]
@@ -2368,7 +2402,11 @@ mod tests {
         );
         ctx.track("g", Value::Null).unwrap();
         let params = ctx.get_publish_params();
-        let float = params.units.iter().find(|u| u.unit_type == "float_id").unwrap();
+        let float = params
+            .units
+            .iter()
+            .find(|u| u.unit_type == "float_id")
+            .unwrap();
         assert_eq!(float.uid, Some(crate::utils::hash_unit("126")));
     }
 
@@ -2824,7 +2862,10 @@ mod tests {
         let data = make_context_data(vec![exp]);
         let ctx = Context::new(data);
 
-        assert_eq!(ctx.custom_field_value("test_exp", "nonexistent").unwrap(), None);
+        assert_eq!(
+            ctx.custom_field_value("test_exp", "nonexistent").unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -2832,7 +2873,10 @@ mod tests {
         let data = make_context_data(vec![]);
         let ctx = Context::new(data);
 
-        assert_eq!(ctx.custom_field_value("nonexistent_exp", "field").unwrap(), None);
+        assert_eq!(
+            ctx.custom_field_value("nonexistent_exp", "field").unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -2887,7 +2931,11 @@ mod tests {
             ctx.custom_field_value_type("test_exp", "enabled").unwrap(),
             Some("boolean".to_string())
         );
-        assert_eq!(ctx.custom_field_value_type("test_exp", "nonexistent").unwrap(), None);
+        assert_eq!(
+            ctx.custom_field_value_type("test_exp", "nonexistent")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -2910,7 +2958,10 @@ mod tests {
 
         let units = ctx.get_units();
         assert_eq!(units.get("session_id"), Some(&serde_json::json!("user123")));
-        assert_eq!(units.get("device_id"), Some(&serde_json::json!("device456")));
+        assert_eq!(
+            units.get("device_id"),
+            Some(&serde_json::json!("device456"))
+        );
     }
 
     #[test]
@@ -2921,8 +2972,14 @@ mod tests {
         ctx.set_units([("session_id", "user123"), ("device_id", "device456")])
             .unwrap();
 
-        assert_eq!(ctx.get_unit("session_id"), Some(&serde_json::json!("user123")));
-        assert_eq!(ctx.get_unit("device_id"), Some(&serde_json::json!("device456")));
+        assert_eq!(
+            ctx.get_unit("session_id"),
+            Some(&serde_json::json!("user123"))
+        );
+        assert_eq!(
+            ctx.get_unit("device_id"),
+            Some(&serde_json::json!("device456"))
+        );
     }
 
     #[test]
