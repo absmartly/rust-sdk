@@ -1,14 +1,58 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
+use serde_json::Value;
+
 use crate::md5::md5;
 
 pub fn base64_url_no_padding(data: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(data)
 }
 
+/// The UTF-8 bytes a string is hashed from (JS `stringToUint8Array`).
+pub fn utf8_bytes(value: &str) -> Vec<u8> {
+    value.as_bytes().to_vec()
+}
+
+/// Whether `value` is a JSON object (JS `isObject`): arrays and null are not.
+pub fn is_object(value: &Value) -> bool {
+    value.is_object()
+}
+
+/// Whether `value` is a JSON number (JS `isNumeric`): numeric strings are not.
+pub fn is_numeric(value: &Value) -> bool {
+    value.is_number()
+}
+
 pub fn hash_unit(value: &str) -> String {
-    let hash = md5(value.as_bytes());
+    let hash = md5(&utf8_bytes(value));
     base64_url_no_padding(&hash)
+}
+
+/// The string a unit UID is hashed as, as in the JS SDK's `hashUnit`:
+/// strings as-is, numbers rounded to an integer like `Number.toFixed(0)`.
+/// `None` for any other JSON type.
+pub fn unit_uid_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Some(i.to_string())
+            } else if let Some(u) = n.as_u64() {
+                Some(u.to_string())
+            } else {
+                let f = n.as_f64()?;
+                // toFixed(0) picks the larger integer on a tie (2.5 -> 3, -2.5 -> -2).
+                let rounded = (f + 0.5).floor();
+                Some(format!("{:.0}", if rounded == 0.0 { 0.0 } else { rounded }))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Hash a unit UID given as a JSON string or number, as the JS SDK does.
+pub fn hash_unit_value(value: &Value) -> Option<String> {
+    unit_uid_string(value).map(|s| hash_unit(&s))
 }
 
 pub fn choose_variant(split: &[f64], prob: f64) -> usize {
@@ -29,6 +73,30 @@ pub fn array_equals_shallow<T: PartialEq>(a: &[T], b: &[T]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_type_checks_match_js() {
+        use serde_json::json;
+        assert!(is_object(&json!({})));
+        assert!(!is_object(&json!([])));
+        assert!(!is_object(&json!(null)));
+        assert!(is_numeric(&json!(1.5)));
+        assert!(!is_numeric(&json!("1")));
+        assert_eq!(utf8_bytes("a\u{e7}b"), vec![97, 195, 167, 98]);
+    }
+
+    #[test]
+    fn test_hash_unit_value_numbers_match_js() {
+        use serde_json::json;
+        assert_eq!(hash_unit_value(&json!(125)), Some(hash_unit("125")));
+        assert_eq!(hash_unit_value(&json!(125.75)), Some(hash_unit("126")));
+        assert_eq!(hash_unit_value(&json!(2.5)), Some(hash_unit("3")));
+        assert_eq!(hash_unit_value(&json!(-2.5)), Some(hash_unit("-2")));
+        assert_eq!(hash_unit_value(&json!(-0.2)), Some(hash_unit("0")));
+        assert_eq!(hash_unit_value(&json!("abc")), Some(hash_unit("abc")));
+        assert_eq!(hash_unit_value(&json!(true)), None);
+        assert_eq!(hash_unit_value(&json!(12345)), Some("gnzLDuqKcGxMNKFokfhOew".to_string()));
+    }
 
     #[test]
     fn test_base64_url_no_padding() {

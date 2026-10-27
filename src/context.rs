@@ -7,7 +7,7 @@ use crate::assigner::VariantAssigner;
 use crate::context_publisher::ContextPublisher;
 use crate::matcher::AudienceMatcher;
 use crate::models::*;
-use crate::utils::{array_equals_shallow, hash_unit};
+use crate::utils::{array_equals_shallow, hash_unit_value};
 
 pub type EventLogger = Box<dyn Fn(&Context, &str, Option<Value>) + Send + Sync>;
 
@@ -19,7 +19,7 @@ struct Experiment {
 pub type DataFetcher = Box<dyn Fn() -> Result<ContextData, String> + Send + Sync>;
 
 pub struct Context {
-    units: HashMap<String, String>,
+    units: HashMap<String, Value>,
     attrs: Vec<Attribute>,
     data: ContextData,
     assignments: HashMap<String, Assignment>,
@@ -252,21 +252,32 @@ impl Context {
         Ok(&self.data)
     }
 
-    pub fn set_unit(&mut self, unit_type: &str, uid: &str) -> Result<(), String> {
+    /// Set the UID for `unit_type`. Like the JS SDK, a UID is a string or a
+    /// number and keeps its type: `get_unit` returns it as given. Strings are
+    /// trimmed and must not be blank; numbers are hashed as their rounded
+    /// integer (see [`crate::utils::hash_unit_value`]).
+    pub fn set_unit(&mut self, unit_type: &str, uid: impl Into<Value>) -> Result<(), String> {
         self.check_not_finalized()?;
 
-        let uid = uid.trim();
-        if uid.is_empty() {
-            return Err(format!("Unit '{}' UID must not be blank.", unit_type));
-        }
+        let uid = match uid.into() {
+            Value::String(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    return Err(format!("Unit '{}' UID must not be blank.", unit_type));
+                }
+                Value::String(trimmed.to_string())
+            }
+            Value::Number(n) => Value::Number(n),
+            _ => return Err(format!("Unit '{}' must be a string or a number.", unit_type)),
+        };
 
         if let Some(existing) = self.units.get(unit_type) {
-            if existing != uid {
+            if *existing != uid {
                 return Err(format!("Unit '{}' UID already set.", unit_type));
             }
         }
 
-        self.units.insert(unit_type.to_string(), uid.to_string());
+        self.units.insert(unit_type.to_string(), uid);
         Ok(())
     }
 
@@ -274,19 +285,19 @@ impl Context {
     where
         I: IntoIterator<Item = (K, V)>,
         K: Into<String>,
-        V: Into<String>,
+        V: Into<Value>,
     {
         for (unit_type, uid) in units {
-            self.set_unit(&unit_type.into(), &uid.into())?;
+            self.set_unit(&unit_type.into(), uid)?;
         }
         Ok(())
     }
 
-    pub fn get_unit(&self, unit_type: &str) -> Option<&String> {
+    pub fn get_unit(&self, unit_type: &str) -> Option<&Value> {
         self.units.get(unit_type)
     }
 
-    pub fn get_units(&self) -> &HashMap<String, String> {
+    pub fn get_units(&self) -> &HashMap<String, Value> {
         &self.units
     }
 
@@ -401,13 +412,21 @@ impl Context {
         Ok(variant)
     }
 
+    /// Queue a goal. `properties` must be a JSON object or null; anything
+    /// else is rejected, as in the JS SDK.
     pub fn track(&mut self, goal_name: &str, properties: impl Into<Value>) -> Result<(), String> {
         self.check_not_finalized()?;
 
-        let properties_map: Option<HashMap<String, Value>> = match properties.into() {
-            Value::Object(map) => Some(map.into_iter().collect()),
+        let properties = properties.into();
+        let properties_map: Option<HashMap<String, Value>> = match properties {
             Value::Null => None,
-            _ => None,
+            Value::Object(map) => Some(map.into_iter().collect()),
+            _ => {
+                return Err(format!(
+                    "Goal '{}' properties must be of type object.",
+                    goal_name
+                ));
+            }
         };
 
         let goal = Goal {
@@ -922,7 +941,7 @@ impl Context {
         }
 
         if let Some(unit) = self.units.get(unit_type) {
-            let hash = hash_unit(unit);
+            let hash = hash_unit_value(unit)?;
             self.hashes.insert(unit_type.to_string(), hash.clone());
             return Some(hash);
         }
@@ -1089,7 +1108,7 @@ mod tests {
         let mut context = Context::new(data);
 
         assert!(context.set_unit("session_id", "user123").is_ok());
-        assert_eq!(context.get_unit("session_id"), Some(&"user123".to_string()));
+        assert_eq!(context.get_unit("session_id"), Some(&serde_json::json!("user123")));
     }
 
     #[test]
@@ -1906,7 +1925,7 @@ mod tests {
     fn test_set_unit_callable_before_ready() {
         let mut ctx = Context::new_loading();
         assert!(ctx.set_unit("session_id", "user123").is_ok());
-        assert_eq!(ctx.get_unit("session_id"), Some(&"user123".to_string()));
+        assert_eq!(ctx.get_unit("session_id"), Some(&serde_json::json!("user123")));
     }
 
     #[test]
@@ -2315,6 +2334,42 @@ mod tests {
             .track("purchase", json!({"amount": 99.99, "count": 1}))
             .is_ok());
         assert_eq!(ctx.pending(), 1);
+    }
+
+    #[test]
+    fn test_track_rejects_non_object_properties() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+
+        for props in [json!(5), json!("str"), json!([1, 2]), json!(true)] {
+            assert_eq!(
+                ctx.track("purchase", props),
+                Err("Goal 'purchase' properties must be of type object.".to_string())
+            );
+        }
+        assert_eq!(ctx.pending(), 0);
+    }
+
+    #[test]
+    fn test_numeric_unit_keeps_type_and_hashes_like_js() {
+        let data = make_context_data(vec![]);
+        let mut ctx = Context::new(data);
+        ctx.set_unit("user_id", 125).unwrap();
+        ctx.set_unit("float_id", 125.75).unwrap();
+        assert_eq!(ctx.get_unit("user_id"), Some(&json!(125)));
+        assert_eq!(ctx.get_unit("float_id"), Some(&json!(125.75)));
+        assert_eq!(
+            ctx.set_unit("user_id", "125"),
+            Err("Unit 'user_id' UID already set.".to_string())
+        );
+        assert_eq!(
+            ctx.set_unit("bad", json!(true)),
+            Err("Unit 'bad' must be a string or a number.".to_string())
+        );
+        ctx.track("g", Value::Null).unwrap();
+        let params = ctx.get_publish_params();
+        let float = params.units.iter().find(|u| u.unit_type == "float_id").unwrap();
+        assert_eq!(float.uid, Some(crate::utils::hash_unit("126")));
     }
 
     #[test]
@@ -2854,8 +2909,8 @@ mod tests {
         ctx.set_unit("device_id", "device456").unwrap();
 
         let units = ctx.get_units();
-        assert_eq!(units.get("session_id"), Some(&"user123".to_string()));
-        assert_eq!(units.get("device_id"), Some(&"device456".to_string()));
+        assert_eq!(units.get("session_id"), Some(&serde_json::json!("user123")));
+        assert_eq!(units.get("device_id"), Some(&serde_json::json!("device456")));
     }
 
     #[test]
@@ -2866,8 +2921,8 @@ mod tests {
         ctx.set_units([("session_id", "user123"), ("device_id", "device456")])
             .unwrap();
 
-        assert_eq!(ctx.get_unit("session_id"), Some(&"user123".to_string()));
-        assert_eq!(ctx.get_unit("device_id"), Some(&"device456".to_string()));
+        assert_eq!(ctx.get_unit("session_id"), Some(&serde_json::json!("user123")));
+        assert_eq!(ctx.get_unit("device_id"), Some(&serde_json::json!("device456")));
     }
 
     #[test]

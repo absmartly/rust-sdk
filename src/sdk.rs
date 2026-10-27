@@ -346,7 +346,7 @@ impl ABsmartly {
     where
         I: IntoIterator<Item = (K, V)>,
         K: Into<String>,
-        V: Into<String>,
+        V: Into<serde_json::Value>,
     {
         let units_vec = collect_units(units);
         validate_units(&units_vec).map_err(SDKError::ConfigError)?;
@@ -367,7 +367,7 @@ impl ABsmartly {
     where
         I: IntoIterator<Item = (K, V)>,
         K: Into<String>,
-        V: Into<String>,
+        V: Into<serde_json::Value>,
     {
         let units_vec = collect_units(units);
         // Invalid units are reported as such, before any network I/O.
@@ -391,14 +391,14 @@ impl ABsmartly {
     where
         I: IntoIterator<Item = (K, V)>,
         K: Into<String>,
-        V: Into<String>,
+        V: Into<serde_json::Value>,
     {
         self.build_context(collect_units(units), Ok(data), options)
     }
 
     fn build_context(
         &self,
-        units: Vec<(String, String)>,
+        units: Vec<(String, serde_json::Value)>,
         data: Result<ContextData, String>,
         options: Option<ContextOptions>,
     ) -> Context {
@@ -407,7 +407,7 @@ impl ABsmartly {
         // identity: the context is failed instead, with the cause attached.
         let mut data = data;
         for (unit_type, uid) in units {
-            if let Err(e) = context.set_unit(&unit_type, &uid) {
+            if let Err(e) = context.set_unit(&unit_type, uid) {
                 warn!("Failed to set unit '{}': {}", unit_type, e);
                 data = Err(format!("Invalid unit '{}': {}", unit_type, e));
             }
@@ -476,21 +476,21 @@ pub(crate) fn blocking_client(timeout_ms: u64) -> Result<Client, String> {
 }
 
 /// Check units the way `Context::set_unit` does (blank or conflicting values).
-fn validate_units(units: &[(String, String)]) -> Result<(), String> {
+fn validate_units(units: &[(String, serde_json::Value)]) -> Result<(), String> {
     let mut probe = Context::new_loading_with_options(ContextOptions::default());
     for (unit_type, uid) in units {
         probe
-            .set_unit(unit_type, uid)
+            .set_unit(unit_type, uid.clone())
             .map_err(|e| format!("Invalid unit '{}': {}", unit_type, e))?;
     }
     Ok(())
 }
 
-fn collect_units<I, K, V>(units: I) -> Vec<(String, String)>
+fn collect_units<I, K, V>(units: I) -> Vec<(String, serde_json::Value)>
 where
     I: IntoIterator<Item = (K, V)>,
     K: Into<String>,
-    V: Into<String>,
+    V: Into<serde_json::Value>,
 {
     units
         .into_iter()
@@ -601,10 +601,10 @@ mod tests {
             None,
         );
 
-        assert_eq!(context.get_unit("session_id"), Some(&"user123".to_string()));
+        assert_eq!(context.get_unit("session_id"), Some(&serde_json::json!("user123")));
         assert_eq!(
             context.get_unit("device_id"),
-            Some(&"device456".to_string())
+            Some(&serde_json::json!("device456"))
         );
     }
 
@@ -626,10 +626,10 @@ mod tests {
 
         let context = sdk.create_context_with(units, data, None);
 
-        assert_eq!(context.get_unit("session_id"), Some(&"user123".to_string()));
+        assert_eq!(context.get_unit("session_id"), Some(&serde_json::json!("user123")));
         assert_eq!(
             context.get_unit("device_id"),
-            Some(&"device456".to_string())
+            Some(&serde_json::json!("device456"))
         );
     }
 
@@ -650,10 +650,10 @@ mod tests {
 
         let context = sdk.create_context_with(units, data, None);
 
-        assert_eq!(context.get_unit("session_id"), Some(&"user123".to_string()));
+        assert_eq!(context.get_unit("session_id"), Some(&serde_json::json!("user123")));
         assert_eq!(
             context.get_unit("device_id"),
-            Some(&"device456".to_string())
+            Some(&serde_json::json!("device456"))
         );
     }
 
@@ -670,7 +670,7 @@ mod tests {
 
         let context = sdk.create_context_with([("session_id", "user123")], data, None);
 
-        assert_eq!(context.get_unit("session_id"), Some(&"user123".to_string()));
+        assert_eq!(context.get_unit("session_id"), Some(&serde_json::json!("user123")));
     }
 
     #[test]
