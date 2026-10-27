@@ -2597,26 +2597,26 @@ mod tests {
         let exp = make_experiment(
             "test_exp",
             vec!["{}", r#"{"button":"red"}"#],
-            vec![0.5, 0.5],
+            vec![0.0, 1.0],
         );
         let data = make_context_data(vec![exp]);
         let mut ctx = Context::new(data);
         ctx.set_unit("session_id", "test_user").unwrap();
 
-        ctx.treatment("test_exp").unwrap();
+        assert_eq!(ctx.treatment("test_exp").unwrap(), 1);
 
         let mut exp2 = make_experiment(
             "test_exp",
             vec!["{}", r#"{"button":"red"}"#],
-            vec![0.5, 0.5],
+            vec![0.0, 1.0],
         );
-        exp2.traffic_split = vec![0.0, 1.0];
+        exp2.traffic_split = vec![1.0, 0.0];
         let data2 = make_context_data(vec![exp2]);
         ctx.set_data_fetcher(Box::new(move || Ok(data2.clone())));
         ctx.refresh().unwrap();
 
-        let _variant = ctx.treatment("test_exp").unwrap();
-        assert!(ctx.pending() > 0);
+        // The unit is now out of traffic, so the cached assignment must be dropped.
+        assert_eq!(ctx.treatment("test_exp").unwrap(), 0);
     }
 
     #[test]
