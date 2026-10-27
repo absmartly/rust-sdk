@@ -646,9 +646,19 @@ impl Context {
     }
 
     /// Apply `new_data` as a refresh, keeping assignments that are still
-    /// valid. Same guards as [`Context::refresh`]: `Err` before ready and once
-    /// finalizing or finalized, and a no-op `Ok` on a failed context.
-    pub fn refresh_with(&mut self, new_data: ContextData) -> Result<(), String> {
+    /// valid. Returns `()` as in 0.1; if the context is not ready or is
+    /// finalizing/finalized the data is left unchanged and an `error` event is
+    /// emitted. Use [`Context::try_refresh_with`] to get the error back.
+    pub fn refresh_with(&mut self, new_data: ContextData) {
+        if let Err(e) = self.try_refresh_with(new_data) {
+            self.log_error(&e);
+        }
+    }
+
+    /// Like [`Context::refresh_with`] but returns the guard error. Same
+    /// guards as [`Context::refresh`]: `Err` before ready and once finalizing
+    /// or finalized, and a no-op `Ok` on a failed context.
+    pub fn try_refresh_with(&mut self, new_data: ContextData) -> Result<(), String> {
         self.check_ready(true)?;
         if !self.failed {
             self.apply_refresh(new_data);
@@ -1622,11 +1632,26 @@ mod tests {
     }
 
     #[test]
+    fn test_refresh_with_returns_unit_and_logs_error_when_finalized() {
+        let mut ctx = Context::new(make_context_data(vec![]));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let sink = log.clone();
+        ctx.set_event_logger(Box::new(move |_, event, _| {
+            sink.lock().unwrap().push(event.to_string());
+        }));
+        ctx.finalize().unwrap();
+        let unit: () = ctx.refresh_with(make_context_data(vec![variable_experiment()]));
+        assert_eq!(unit, ());
+        assert!(ctx.experiments().unwrap().is_empty());
+        assert!(log.lock().unwrap().iter().any(|e| e == "error"));
+    }
+
+    #[test]
     fn test_refresh_after_finalize_is_rejected() {
         let mut ctx = Context::new(make_context_data(vec![]));
         ctx.finalize().unwrap();
         assert_eq!(
-            ctx.refresh_with(make_context_data(vec![])),
+            ctx.try_refresh_with(make_context_data(vec![])),
             Err("ABsmartly Context is finalized.".to_string())
         );
         assert_eq!(
@@ -1675,7 +1700,7 @@ mod tests {
             ("refresh", ctx.refresh()),
             (
                 "refresh_with",
-                ctx.refresh_with(make_context_data(vec![variable_experiment()])),
+                ctx.try_refresh_with(make_context_data(vec![variable_experiment()])),
             ),
         ]
     }
@@ -1771,7 +1796,7 @@ mod tests {
 
         assert_eq!(ctx.refresh(), Ok(()));
         assert_eq!(
-            ctx.refresh_with(make_context_data(vec![variable_experiment()])),
+            ctx.try_refresh_with(make_context_data(vec![variable_experiment()])),
             Ok(())
         );
 

@@ -409,6 +409,8 @@ async fn invalid_unit_never_yields_a_ready_context() {
         .await;
     assert!(failed.is_failed());
     assert!(failed.ready_error().is_some());
+    // The unit is rejected before any context fetch.
+    assert!(server.gets().is_empty());
 
     assert!(sdk
         .create_context([("session_id", "")], None)
