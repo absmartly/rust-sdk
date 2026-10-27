@@ -561,3 +561,23 @@ async fn retries_stop_at_the_timeout_budget() {
     let attempts = server.gets().len();
     assert!((2..=6).contains(&attempts), "attempts: {}", attempts);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_timeout_disables_deadline_for_publish_and_refresh() {
+    let server = start_server(Plan::default()).await;
+    let sdk = retrying_sdk(&server.base, 0, 0);
+    let data = serde_json::from_str(CONTEXT_BODY).unwrap();
+    let mut context = sdk.create_context_with([("session_id", "user-1")], data, None);
+    context.track("goal", serde_json::json!({})).unwrap();
+    assert!(context.pending() > 0);
+    context
+        .publish()
+        .expect("zero timeout disables the deadline");
+    assert_eq!(context.pending(), 0);
+    assert_eq!(server.puts().len(), 1);
+    context.refresh().expect("refresh has no deadline either");
+    assert!(!context.is_failed());
+    sdk.create_context([("session_id", "user-2")], None)
+        .await
+        .expect("async client also supports a disabled deadline");
+}

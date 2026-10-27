@@ -143,11 +143,7 @@ impl ABsmartlyBuilder {
             retries: Some(self.retries.unwrap_or(5)),
         };
 
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_millis(
-                config.timeout_ms.unwrap_or(3000),
-            ))
-            .build()?;
+        let client = client_builder(config.timeout_ms.unwrap_or(3000)).build()?;
 
         Ok(ABsmartly { config, client })
     }
@@ -475,10 +471,18 @@ where
 /// A client for use inside [`run_blocking`]; a client created on another
 /// runtime must not be reused because its pooled connections belong to it.
 pub(crate) fn blocking_client(timeout_ms: u64) -> Result<Client, String> {
-    Client::builder()
-        .timeout(std::time::Duration::from_millis(timeout_ms))
+    client_builder(timeout_ms)
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))
+}
+
+fn client_builder(timeout_ms: u64) -> reqwest::ClientBuilder {
+    let builder = Client::builder();
+    if timeout_ms == 0 {
+        builder
+    } else {
+        builder.timeout(std::time::Duration::from_millis(timeout_ms))
+    }
 }
 
 /// Check units the way `Context::set_unit` does (blank or conflicting values).
