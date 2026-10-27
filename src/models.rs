@@ -9,6 +9,25 @@ where
     Ok(opt.unwrap_or_default())
 }
 
+/// The backend serializes seed fields as signed 32-bit integers (their raw
+/// two's-complement bit pattern), so values are frequently negative. Decode as
+/// i32 and reinterpret the bits as u32 rather than rejecting negative values.
+/// Unsigned values (as this crate serializes the field) are accepted too, so
+/// serialized context data can be loaded again.
+fn deserialize_seed<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = i64::deserialize(deserializer)?;
+    if v < i64::from(i32::MIN) || v > i64::from(u32::MAX) {
+        return Err(serde::de::Error::custom(format!(
+            "seed {} is out of the 32-bit range",
+            v
+        )));
+    }
+    Ok(v as u32)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextData {
@@ -29,9 +48,9 @@ pub struct ExperimentData {
     pub full_on_variant: i64,
     #[serde(default)]
     pub traffic_split: Vec<f64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_seed")]
     pub traffic_seed_hi: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_seed")]
     pub traffic_seed_lo: u32,
     #[serde(default, deserialize_with = "deserialize_null_string")]
     pub audience: String,
@@ -39,9 +58,9 @@ pub struct ExperimentData {
     pub audience_strict: bool,
     #[serde(default)]
     pub split: Vec<f64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_seed")]
     pub seed_hi: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_seed")]
     pub seed_lo: u32,
     #[serde(default)]
     pub variants: Vec<Variant>,
@@ -138,8 +157,9 @@ pub struct PublishParams {
     pub attributes: Option<Vec<Attribute>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ContextState {
+    #[default]
     Loading,
     Ready,
     Failed,
@@ -147,19 +167,78 @@ pub enum ContextState {
     Finalized,
 }
 
-impl Default for ContextState {
-    fn default() -> Self {
-        Self::Loading
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct ContextParams {
     pub units: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Default)]
+/// Event logger callback: invoked with the context, the event name, and optional data.
+pub type EventLogger =
+    std::sync::Arc<dyn Fn(&crate::context::Context, &str, Option<serde_json::Value>) + Send + Sync>;
+
+#[derive(Clone, Default)]
 pub struct ContextOptions {
     pub publish_delay: i64,
     pub refresh_period: i64,
+    pub event_logger: Option<EventLogger>,
+}
+
+impl std::fmt::Debug for ContextOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContextOptions")
+            .field("publish_delay", &self.publish_delay)
+            .field("refresh_period", &self.refresh_period)
+            .field(
+                "event_logger",
+                &self.event_logger.as_ref().map(|_| "<closure>"),
+            )
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_negative_seed_round_trips_through_serialization() {
+        let json = r#"{"experiments":[{"id":1,"name":"test","seedHi":-1,"seedLo":-2147483648,"trafficSeedHi":7,"trafficSeedLo":-5}]}"#;
+        let data: ContextData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.experiments[0].seed_hi, u32::MAX);
+        let again: ContextData =
+            serde_json::from_str(&serde_json::to_string(&data).unwrap()).unwrap();
+        let (a, b) = (&data.experiments[0], &again.experiments[0]);
+        assert_eq!(
+            (a.seed_hi, a.seed_lo, a.traffic_seed_hi, a.traffic_seed_lo),
+            (b.seed_hi, b.seed_lo, b.traffic_seed_hi, b.traffic_seed_lo)
+        );
+        assert!(serde_json::from_str::<ContextData>(
+            r#"{"experiments":[{"id":1,"name":"t","seedHi":4294967296}]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_context_options_debug_without_logger() {
+        let opts = ContextOptions {
+            publish_delay: 100,
+            refresh_period: 200,
+            event_logger: None,
+        };
+        let debug_str = format!("{:?}", opts);
+        assert!(debug_str.contains("publish_delay: 100"));
+        assert!(debug_str.contains("refresh_period: 200"));
+        assert!(debug_str.contains("None"));
+    }
+
+    #[test]
+    fn test_context_options_debug_with_logger() {
+        let opts = ContextOptions {
+            publish_delay: 100,
+            refresh_period: 200,
+            event_logger: Some(std::sync::Arc::new(|_ctx, _event, _data| {})),
+        };
+        let debug_str = format!("{:?}", opts);
+        assert!(debug_str.contains("<closure>"));
+    }
 }

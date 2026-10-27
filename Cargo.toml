@@ -1,6 +1,6 @@
 [package]
 name = "absmartly-sdk"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["ABsmartly"]
 description = "ABsmartly SDK for Rust - A/B testing and feature flagging"
@@ -21,8 +21,9 @@ thiserror = "1.0"
 md-5 = "0.10"
 base64 = "0.22"
 reqwest = { version = "0.12", features = ["json"] }
-tokio = { version = "1.0", features = ["rt-multi-thread"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "time"] }
 urlencoding = "2.1"
+log = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full", "test-util"] }
