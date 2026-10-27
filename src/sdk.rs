@@ -199,6 +199,8 @@ pub enum SDKError {
     ConfigError(String),
     #[error("Request timed out after {0}ms")]
     Timeout(u64),
+    #[error("HTTP request failed with status {0}")]
+    HttpStatus(u16),
 }
 
 const DEFAULT_AGENT: &str = "absmartly-rust-sdk";
@@ -240,8 +242,12 @@ where
             let error = match build().send().await {
                 Ok(resp) if resp.status().is_success() => return Ok(resp),
                 Ok(resp) => {
-                    let bail = resp.status().is_client_error();
-                    let error = SDKError::HttpError(resp.error_for_status().unwrap_err());
+                    let bail = !resp.status().is_server_error();
+                    let status = resp.status().as_u16();
+                    let error = match resp.error_for_status() {
+                        Err(e) => SDKError::HttpError(e),
+                        Ok(_) => SDKError::HttpStatus(status),
+                    };
                     if bail {
                         return Err(error);
                     }

@@ -8,7 +8,7 @@ A Rust SDK for [ABsmartly](https://www.absmartly.com) - A/B testing and feature 
 
 ## Compatibility
 
-**0.2.0 is a breaking release** (minor bump under 0.x semver): `ContextOptions` gained an `event_logger` field (construct it with `..Default::default()`), and `Context::refresh()` is now the fetch-based refresh (use `refresh_with(data)` to apply data you already have). `SDK::new(SDKConfig)`, `set_event_logger(Box<..>)`, and `refresh_with` returning `()` are unchanged from 0.1 (`try_refresh_with` returns the error instead). The `in` operator now takes the list first, `[haystack, needle]`, as in the JavaScript SDK; audiences written needle-first must be updated.
+**0.2.0 is a breaking release** (minor bump under 0.x semver): `ContextOptions` gained an `event_logger` field (construct it with `..Default::default()`), and `Context::refresh()` is now the fetch-based refresh (use `refresh_with(data)` to apply data you already have). `SDK::new(SDKConfig)`, `set_event_logger(Box<..>)`, and `refresh_with` returning `()` are unchanged from 0.1 (`try_refresh_with` returns the error instead). The `in` operator now takes the list first, `[haystack, needle]`, as in the JavaScript SDK; audiences written needle-first must be updated. `SDKError` gained an `HttpStatus(u16)` variant for final non-success responses that are not 4xx/5xx (such as a 304).
 
 The ABsmartly Rust SDK is compatible with Rust 2021 edition and later. It uses async/await with [tokio](https://tokio.rs/) for network operations and provides a synchronous interface for variant assignment and goal tracking.
 

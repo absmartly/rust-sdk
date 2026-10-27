@@ -12,11 +12,19 @@ where
 /// The backend serializes seed fields as signed 32-bit integers (their raw
 /// two's-complement bit pattern), so values are frequently negative. Decode as
 /// i32 and reinterpret the bits as u32 rather than rejecting negative values.
+/// Unsigned values (as this crate serializes the field) are accepted too, so
+/// serialized context data can be loaded again.
 fn deserialize_seed<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let v = i32::deserialize(deserializer)?;
+    let v = i64::deserialize(deserializer)?;
+    if v < i64::from(i32::MIN) || v > i64::from(u32::MAX) {
+        return Err(serde::de::Error::custom(format!(
+            "seed {} is out of the 32-bit range",
+            v
+        )));
+    }
     Ok(v as u32)
 }
 
@@ -191,6 +199,24 @@ impl std::fmt::Debug for ContextOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_negative_seed_round_trips_through_serialization() {
+        let json = r#"{"experiments":[{"id":1,"name":"test","seedHi":-1,"seedLo":-2147483648,"trafficSeedHi":7,"trafficSeedLo":-5}]}"#;
+        let data: ContextData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.experiments[0].seed_hi, u32::MAX);
+        let again: ContextData =
+            serde_json::from_str(&serde_json::to_string(&data).unwrap()).unwrap();
+        let (a, b) = (&data.experiments[0], &again.experiments[0]);
+        assert_eq!(
+            (a.seed_hi, a.seed_lo, a.traffic_seed_hi, a.traffic_seed_lo),
+            (b.seed_hi, b.seed_lo, b.traffic_seed_hi, b.traffic_seed_lo)
+        );
+        assert!(serde_json::from_str::<ContextData>(
+            r#"{"experiments":[{"id":1,"name":"t","seedHi":4294967296}]}"#
+        )
+        .is_err());
+    }
 
     #[test]
     fn test_context_options_debug_without_logger() {

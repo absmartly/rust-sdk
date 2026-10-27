@@ -292,3 +292,44 @@ async fn real_http_get_and_put_against_local_server() {
         "tracked goal name should round-trip"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publish_returns_error_on_final_3xx_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                continue;
+            };
+            tokio::spawn(async move {
+                let _ = read_full_request(&mut stream).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n")
+                    .await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    let sdk = ABsmartly::builder()
+        .endpoint(&base)
+        .api_key("k")
+        .application("www")
+        .environment("production")
+        .build()
+        .expect("SDK should build");
+    let params = absmartly_sdk::PublishParams {
+        published_at: 0,
+        units: vec![],
+        hashed: true,
+        exposures: None,
+        goals: None,
+        attributes: None,
+    };
+    let err = sdk
+        .publish(&params)
+        .await
+        .expect_err("a 304 publish response must be an error, not a panic");
+    assert!(err.to_string().contains("304"), "unexpected error: {err}");
+}

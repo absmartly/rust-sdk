@@ -41,9 +41,10 @@ pub fn unit_uid_string(value: &Value) -> Option<String> {
                 Some(u.to_string())
             } else {
                 let f = n.as_f64()?;
-                // toFixed(0) picks the larger integer on a tie (2.5 -> 3, -2.5 -> -2).
-                let rounded = (f + 0.5).floor();
-                Some(format!("{:.0}", if rounded == 0.0 { 0.0 } else { rounded }))
+                // toFixed(0) rounds the magnitude half away from zero and keeps
+                // the sign of a negative input (-2.5 -> "-3", -0.2 -> "-0").
+                let sign = if f < 0.0 { "-" } else { "" };
+                Some(format!("{}{:.0}", sign, f.abs().round()))
             }
         }
         _ => None,
@@ -91,8 +92,14 @@ mod tests {
         assert_eq!(hash_unit_value(&json!(125)), Some(hash_unit("125")));
         assert_eq!(hash_unit_value(&json!(125.75)), Some(hash_unit("126")));
         assert_eq!(hash_unit_value(&json!(2.5)), Some(hash_unit("3")));
-        assert_eq!(hash_unit_value(&json!(-2.5)), Some(hash_unit("-2")));
-        assert_eq!(hash_unit_value(&json!(-0.2)), Some(hash_unit("0")));
+        assert_eq!(hash_unit_value(&json!(-2.5)), Some(hash_unit("-3")));
+        assert_eq!(hash_unit_value(&json!(-0.5)), Some(hash_unit("-1")));
+        assert_eq!(hash_unit_value(&json!(-0.2)), Some(hash_unit("-0")));
+        assert_eq!(hash_unit_value(&json!(-1.4)), Some(hash_unit("-1")));
+        assert_eq!(
+            hash_unit_value(&json!(0.49999999999999994)),
+            Some(hash_unit("0"))
+        );
         assert_eq!(hash_unit_value(&json!("abc")), Some(hash_unit("abc")));
         assert_eq!(hash_unit_value(&json!(true)), None);
         assert_eq!(
