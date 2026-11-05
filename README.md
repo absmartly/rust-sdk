@@ -8,7 +8,7 @@ A Rust SDK for [ABsmartly](https://www.absmartly.com) - A/B testing and feature 
 
 ## Compatibility
 
-**0.2.0 is a breaking release** (minor bump under 0.x semver): `ContextOptions` gained an `event_logger` field (construct it with `..Default::default()`), and `Context::refresh()` is now the fetch-based refresh (use `refresh_with(data)` to apply data you already have). `SDK::new(SDKConfig)`, `set_event_logger(Box<..>)`, and `refresh_with` returning `()` are unchanged from 0.1 (`try_refresh_with` returns the error instead). The `in` operator now takes the list first, `[haystack, needle]`, as in the JavaScript SDK; audiences written needle-first must be updated. `SDKError` gained an `HttpStatus(u16)` variant for final non-success responses that are not 4xx/5xx (such as a 304).
+**0.2.0 is a breaking release** (minor bump under 0.x semver): `ContextOptions` gained an `event_logger` field (construct it with `..Default::default()`), and `Context::refresh()` is now the fetch-based refresh (use `refresh_with(data)` to apply data you already have). The crate is now imported as `absmartly` (the package is still `absmartly-sdk`), and the client types are renamed: `ABsmartly` → `Sdk`, `ABsmartlyBuilder` → `SdkBuilder`, `SDKConfig` → `SdkConfig`, `SDKError` → `SdkError`; the `SDK` wrapper is replaced by `Sdk::from_config(SdkConfig)`. `set_event_logger(Box<..>)`, and `refresh_with` returning `()` are unchanged from 0.1 (`try_refresh_with` returns the error instead). The `in` operator now takes the list first, `[haystack, needle]`, as in the JavaScript SDK; audiences written needle-first must be updated. `SdkError` gained an `HttpStatus(u16)` variant for final non-success responses that are not 4xx/5xx (such as a 304).
 
 The ABsmartly Rust SDK is compatible with Rust 2021 edition and later. It uses async/await with [tokio](https://tokio.rs/) for network operations and provides a synchronous interface for variant assignment and goal tracking.
 
@@ -32,9 +32,9 @@ This example assumes an API Key, an Application, and an Environment have been cr
 #### Recommended: Builder Pattern
 
 ```rust
-use absmartly_sdk::ABsmartly;
+use absmartly::Sdk;
 
-let sdk = ABsmartly::builder()
+let sdk = Sdk::builder()
     .endpoint("https://your-company.absmartly.io/v1")
     .api_key("YOUR-API-KEY")
     .application("website")
@@ -45,9 +45,9 @@ let sdk = ABsmartly::builder()
 #### With Optional Parameters
 
 ```rust
-use absmartly_sdk::ABsmartly;
+use absmartly::Sdk;
 
-let sdk = ABsmartly::builder()
+let sdk = Sdk::builder()
     .endpoint("https://your-company.absmartly.io/v1")
     .api_key("YOUR-API-KEY")
     .application("website")
@@ -61,9 +61,9 @@ let sdk = ABsmartly::builder()
 #### Positional Parameters
 
 ```rust
-use absmartly_sdk::ABsmartly;
+use absmartly::Sdk;
 
-let sdk = ABsmartly::new(
+let sdk = Sdk::new(
     "https://your-company.absmartly.io/v1",
     "YOUR-API-KEY",
     "website",
@@ -88,9 +88,9 @@ let sdk = ABsmartly::new(
 ### With Async Network Fetch
 
 ```rust
-use absmartly_sdk::ABsmartly;
+use absmartly::Sdk;
 
-let sdk = ABsmartly::new(
+let sdk = Sdk::new(
     "https://your-company.absmartly.io/v1",
     "YOUR-API-KEY",
     "website",
@@ -116,9 +116,9 @@ if let Some(error) = context.ready_error() {
 When doing full-stack experimentation with ABsmartly, we recommend creating a context only once on the server-side. Creating a context involves a round-trip to the ABsmartly event collector. We can avoid repeating the round-trip on the client-side by sending the server-side data embedded in the first document.
 
 ```rust
-use absmartly_sdk::{ABsmartly, ContextData};
+use absmartly::{Sdk, ContextData};
 
-let sdk = ABsmartly::new(
+let sdk = Sdk::new(
     "https://your-company.absmartly.io/v1",
     "YOUR-API-KEY",
     "website",
@@ -332,7 +332,7 @@ let mut context = sdk.create_context(units, Some(options)).await?;
 The SDK uses Rust's `Result` type for error handling:
 
 ```rust
-use absmartly_sdk::SDKError;
+use absmartly::SdkError;
 
 match context.set_unit("user_id", "12345") {
     Ok(_) => println!("Unit set successfully"),
@@ -355,17 +355,17 @@ use axum::{
     extract::State,
     response::Html,
 };
-use absmartly_sdk::ABsmartly;
+use absmartly::Sdk;
 use std::sync::Arc;
 
 #[derive(Clone)]
 struct AppState {
-    absmartly: Arc<ABsmartly>,
+    absmartly: Arc<Sdk>,
 }
 
 #[tokio::main]
 async fn main() {
-    let sdk = ABsmartly::new(
+    let sdk = Sdk::new(
         "https://your-company.absmartly.io/v1",
         "YOUR-API-KEY",
         "website",
@@ -412,11 +412,11 @@ async fn handler(State(state): State<AppState>) -> Html<String> {
 
 ```rust
 use actix_web::{get, web, App, HttpServer, HttpResponse};
-use absmartly_sdk::ABsmartly;
+use absmartly::Sdk;
 use std::sync::Arc;
 
 struct AppState {
-    absmartly: Arc<ABsmartly>,
+    absmartly: Arc<Sdk>,
 }
 
 #[get("/")]
@@ -443,7 +443,7 @@ async fn index(data: web::Data<AppState>) -> HttpResponse {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let sdk = ABsmartly::new(
+    let sdk = Sdk::new(
         "https://your-company.absmartly.io/v1",
         "YOUR-API-KEY",
         "website",
@@ -469,11 +469,11 @@ async fn main() -> std::io::Result<()> {
 
 ```rust
 use rocket::{State, get, routes};
-use absmartly_sdk::ABsmartly;
+use absmartly::Sdk;
 use std::sync::Arc;
 
 #[get("/")]
-async fn index(sdk: &State<Arc<ABsmartly>>) -> String {
+async fn index(sdk: &State<Arc<Sdk>>) -> String {
     let units = [("session_id", "example-session-id")];
 
     let mut context = sdk.create_context(units, None)
@@ -495,7 +495,7 @@ async fn index(sdk: &State<Arc<ABsmartly>>) -> String {
 
 #[rocket::main]
 async fn main() {
-    let sdk = ABsmartly::new(
+    let sdk = Sdk::new(
         "https://your-company.absmartly.io/v1",
         "YOUR-API-KEY",
         "website",
