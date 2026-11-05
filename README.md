@@ -8,7 +8,7 @@ A Rust SDK for [ABsmartly](https://www.absmartly.com) - A/B testing and feature 
 
 ## Compatibility
 
-**0.2.0 is a breaking release** (minor bump under 0.x semver): `ContextOptions` gained an `event_logger` field (construct it with `..Default::default()`), and `Context::refresh()` is now the fetch-based refresh (use `refresh_with(data)` to apply data you already have). The crate is now imported as `absmartly` (the package is still `absmartly-sdk`), and the client types are renamed: `ABsmartly` → `Sdk`, `ABsmartlyBuilder` → `SdkBuilder`, `SDKConfig` → `SdkConfig`, `SDKError` → `SdkError`; the `SDK` wrapper is replaced by `Sdk::from_config(SdkConfig)`. `set_event_logger(Box<..>)`, and `refresh_with` returning `()` are unchanged from 0.1 (`try_refresh_with` returns the error instead). The `in` operator now takes the list first, `[haystack, needle]`, as in the JavaScript SDK; audiences written needle-first must be updated. `SdkError` gained an `HttpStatus(u16)` variant for final non-success responses that are not 4xx/5xx (such as a 304).
+**0.2.0 is a breaking release** (minor bump under 0.x semver): `ContextOptions` gained an `event_logger` field (construct it with `..Default::default()`), and `Context::refresh()` is now the fetch-based refresh (use `refresh_with(data)` to apply data you already have). The crate is now imported as `absmartly` (the package is still `absmartly-sdk`), and the client types are renamed: `ABsmartly` → `Client`, `ABsmartlyBuilder` → `ClientBuilder`, `SDKConfig` → `Config`, `SDKError` → `Error`; the `SDK` wrapper is replaced by `Client::from_config(Config)`. `set_event_logger(Box<..>)` and `refresh_with` returning `()` are unchanged from 0.1 (`try_refresh_with` returns the error instead). The `in` operator now takes the list first, `[haystack, needle]`, as in the JavaScript SDK; audiences written needle-first must be updated. `Error` (formerly `SDKError`) gained an `HttpStatus(u16)` variant for final non-success responses that are not 4xx/5xx (such as a 304).
 
 The ABsmartly Rust SDK is compatible with Rust 2021 edition and later. It uses async/await with [tokio](https://tokio.rs/) for network operations and provides a synchronous interface for variant assignment and goal tracking.
 
@@ -32,9 +32,9 @@ This example assumes an API Key, an Application, and an Environment have been cr
 #### Recommended: Builder Pattern
 
 ```rust
-use absmartly::Sdk;
+use absmartly::Client;
 
-let sdk = Sdk::builder()
+let client = Client::builder()
     .endpoint("https://your-company.absmartly.io/v1")
     .api_key("YOUR-API-KEY")
     .application("website")
@@ -45,9 +45,9 @@ let sdk = Sdk::builder()
 #### With Optional Parameters
 
 ```rust
-use absmartly::Sdk;
+use absmartly::Client;
 
-let sdk = Sdk::builder()
+let client = Client::builder()
     .endpoint("https://your-company.absmartly.io/v1")
     .api_key("YOUR-API-KEY")
     .application("website")
@@ -61,9 +61,9 @@ let sdk = Sdk::builder()
 #### Positional Parameters
 
 ```rust
-use absmartly::Sdk;
+use absmartly::Client;
 
-let sdk = Sdk::new(
+let client = Client::new(
     "https://your-company.absmartly.io/v1",
     "YOUR-API-KEY",
     "website",
@@ -88,9 +88,9 @@ let sdk = Sdk::new(
 ### With Async Network Fetch
 
 ```rust
-use absmartly::Sdk;
+use absmartly::Client;
 
-let sdk = Sdk::new(
+let client = Client::new(
     "https://your-company.absmartly.io/v1",
     "YOUR-API-KEY",
     "website",
@@ -99,13 +99,13 @@ let sdk = Sdk::new(
 
 let units = [("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")];
 
-let mut context = sdk.create_context(units, None).await?;
+let mut context = client.create_context(units, None).await?;
 ```
 
 `create_context()` returns `Err` when the context data cannot be fetched. If you prefer a context in every case, use `create_context_or_failed()`. When the fetch fails, it returns a failed context: `is_failed()` is `true`, `ready_error()` holds the cause, and the event logger receives an `error` event. A failed context returns control variants and default values, and it discards its events on publish.
 
 ```rust
-let context = sdk.create_context_or_failed(units, None).await;
+let context = client.create_context_or_failed(units, None).await;
 if let Some(error) = context.ready_error() {
     eprintln!("ABsmartly context failed to load: {}", error);
 }
@@ -116,9 +116,9 @@ if let Some(error) = context.ready_error() {
 When doing full-stack experimentation with ABsmartly, we recommend creating a context only once on the server-side. Creating a context involves a round-trip to the ABsmartly event collector. We can avoid repeating the round-trip on the client-side by sending the server-side data embedded in the first document.
 
 ```rust
-use absmartly::{Sdk, ContextData};
+use absmartly::{Client, ContextData};
 
-let sdk = Sdk::new(
+let client = Client::new(
     "https://your-company.absmartly.io/v1",
     "YOUR-API-KEY",
     "website",
@@ -129,7 +129,7 @@ let units = [("session_id", "5ebf06d8cb5d8137290c4abb64155584fbdb64d8")];
 
 let context_data: ContextData = serde_json::from_str(&api_response)?;
 
-let mut context = sdk.create_context_with(units, context_data, None);
+let mut context = client.create_context_with(units, context_data, None);
 assert!(context.is_ready());
 ```
 
@@ -275,7 +275,7 @@ context.publish()?;
 
 `publish()` returns `Err` when the collector does not accept the events. The events then stay pending, so a later `publish()` sends them again, and the event logger receives an `error` event.
 
-On a multi-thread tokio runtime the default publisher waits for the collector's response. A current-thread runtime cannot block, so there the request is sent in the background: `publish()` returns `Ok(())` before the response arrives, and a failure is only logged. To get the result on a current-thread runtime, call `sdk.publish(&context.get_publish_params()).await` yourself.
+On a multi-thread tokio runtime the default publisher waits for the collector's response. A current-thread runtime cannot block, so there the request is sent in the background: `publish()` returns `Ok(())` before the response arrives, and a failure is only logged. To get the result on a current-thread runtime, call `client.publish(&context.get_publish_params()).await` yourself.
 
 ### Finalizing
 
@@ -312,7 +312,7 @@ let options = ContextOptions {
     })),
     ..Default::default()
 };
-let mut context = sdk.create_context(units, Some(options)).await?;
+let mut context = client.create_context(units, Some(options)).await?;
 ```
 
 **Event Types**
@@ -332,7 +332,7 @@ let mut context = sdk.create_context(units, Some(options)).await?;
 The SDK uses Rust's `Result` type for error handling:
 
 ```rust
-use absmartly::SdkError;
+use absmartly::Error;
 
 match context.set_unit("user_id", "12345") {
     Ok(_) => println!("Unit set successfully"),
@@ -355,17 +355,17 @@ use axum::{
     extract::State,
     response::Html,
 };
-use absmartly::Sdk;
+use absmartly::Client;
 use std::sync::Arc;
 
 #[derive(Clone)]
 struct AppState {
-    absmartly: Arc<Sdk>,
+    absmartly: Arc<Client>,
 }
 
 #[tokio::main]
 async fn main() {
-    let sdk = Sdk::new(
+    let client = Client::new(
         "https://your-company.absmartly.io/v1",
         "YOUR-API-KEY",
         "website",
@@ -373,7 +373,7 @@ async fn main() {
     ).expect("Failed to initialize ABsmartly SDK");
 
     let state = AppState {
-        absmartly: Arc::new(sdk),
+        absmartly: Arc::new(client),
     };
 
     let app = Router::new()
@@ -412,11 +412,11 @@ async fn handler(State(state): State<AppState>) -> Html<String> {
 
 ```rust
 use actix_web::{get, web, App, HttpServer, HttpResponse};
-use absmartly::Sdk;
+use absmartly::Client;
 use std::sync::Arc;
 
 struct AppState {
-    absmartly: Arc<Sdk>,
+    absmartly: Arc<Client>,
 }
 
 #[get("/")]
@@ -443,7 +443,7 @@ async fn index(data: web::Data<AppState>) -> HttpResponse {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let sdk = Sdk::new(
+    let client = Client::new(
         "https://your-company.absmartly.io/v1",
         "YOUR-API-KEY",
         "website",
@@ -451,7 +451,7 @@ async fn main() -> std::io::Result<()> {
     ).expect("Failed to initialize ABsmartly SDK");
 
     let app_state = web::Data::new(AppState {
-        absmartly: Arc::new(sdk),
+        absmartly: Arc::new(client),
     });
 
     HttpServer::new(move || {
@@ -469,14 +469,14 @@ async fn main() -> std::io::Result<()> {
 
 ```rust
 use rocket::{State, get, routes};
-use absmartly::Sdk;
+use absmartly::Client;
 use std::sync::Arc;
 
 #[get("/")]
-async fn index(sdk: &State<Arc<Sdk>>) -> String {
+async fn index(client: &State<Arc<Client>>) -> String {
     let units = [("session_id", "example-session-id")];
 
-    let mut context = sdk.create_context(units, None)
+    let mut context = client.create_context(units, None)
         .await
         .expect("Failed to create context");
 
@@ -495,7 +495,7 @@ async fn index(sdk: &State<Arc<Sdk>>) -> String {
 
 #[rocket::main]
 async fn main() {
-    let sdk = Sdk::new(
+    let client = Client::new(
         "https://your-company.absmartly.io/v1",
         "YOUR-API-KEY",
         "website",
@@ -503,7 +503,7 @@ async fn main() {
     ).expect("Failed to initialize ABsmartly SDK");
 
     rocket::build()
-        .manage(Arc::new(sdk))
+        .manage(Arc::new(client))
         .mount("/", routes![index])
         .launch()
         .await

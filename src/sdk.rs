@@ -2,10 +2,10 @@ use crate::context::Context;
 use crate::context_publisher::DefaultContextPublisher;
 use crate::models::{ContextData, ContextOptions, PublishParams};
 use log::warn;
-use reqwest::Client;
+use reqwest::Client as HttpClient;
 
 #[derive(Debug, Clone)]
-pub struct SdkConfig {
+pub struct Config {
     pub endpoint: String,
     pub api_key: String,
     pub application: String,
@@ -15,7 +15,7 @@ pub struct SdkConfig {
     pub retries: Option<u32>,
 }
 
-impl SdkConfig {
+impl Config {
     pub fn new(
         endpoint: impl Into<String>,
         api_key: impl Into<String>,
@@ -50,7 +50,7 @@ impl SdkConfig {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct SdkBuilder {
+pub struct ClientBuilder {
     endpoint: Option<String>,
     api_key: Option<String>,
     application: Option<String>,
@@ -60,7 +60,7 @@ pub struct SdkBuilder {
     retries: Option<u32>,
 }
 
-impl SdkBuilder {
+impl ClientBuilder {
     pub fn new() -> Self {
         Self::default()
     }
@@ -100,40 +100,38 @@ impl SdkBuilder {
         self
     }
 
-    pub fn build(self) -> Result<Sdk, SdkError> {
+    pub fn build(self) -> Result<Client, Error> {
         let endpoint = self
             .endpoint
-            .ok_or_else(|| SdkError::ConfigError("endpoint is required".to_string()))?;
+            .ok_or_else(|| Error::ConfigError("endpoint is required".to_string()))?;
         let api_key = self
             .api_key
-            .ok_or_else(|| SdkError::ConfigError("api_key is required".to_string()))?;
+            .ok_or_else(|| Error::ConfigError("api_key is required".to_string()))?;
         let application = self
             .application
-            .ok_or_else(|| SdkError::ConfigError("application is required".to_string()))?;
+            .ok_or_else(|| Error::ConfigError("application is required".to_string()))?;
         let environment = self
             .environment
-            .ok_or_else(|| SdkError::ConfigError("environment is required".to_string()))?;
+            .ok_or_else(|| Error::ConfigError("environment is required".to_string()))?;
 
         if endpoint.is_empty() {
-            return Err(SdkError::ConfigError(
-                "endpoint cannot be empty".to_string(),
-            ));
+            return Err(Error::ConfigError("endpoint cannot be empty".to_string()));
         }
         if api_key.is_empty() {
-            return Err(SdkError::ConfigError("api_key cannot be empty".to_string()));
+            return Err(Error::ConfigError("api_key cannot be empty".to_string()));
         }
         if application.is_empty() {
-            return Err(SdkError::ConfigError(
+            return Err(Error::ConfigError(
                 "application cannot be empty".to_string(),
             ));
         }
         if environment.is_empty() {
-            return Err(SdkError::ConfigError(
+            return Err(Error::ConfigError(
                 "environment cannot be empty".to_string(),
             ));
         }
 
-        let config = SdkConfig {
+        let config = Config {
             endpoint,
             api_key,
             application,
@@ -145,17 +143,17 @@ impl SdkBuilder {
 
         let client = client_builder(config.timeout_ms.unwrap_or(3000)).build()?;
 
-        Ok(Sdk { config, client })
+        Ok(Client { config, client })
     }
 }
 
-pub struct Sdk {
-    config: SdkConfig,
-    client: Client,
+pub struct Client {
+    config: Config,
+    client: HttpClient,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SdkError {
+pub enum Error {
     #[error("HTTP request failed: {0}")]
     HttpError(#[from] reqwest::Error),
     #[error("Invalid configuration: {0}")]
@@ -190,9 +188,9 @@ fn retry_jitter_ms() -> u64 {
 /// exponential backoff, a 4xx fails at once, and the whole exchange (all
 /// attempts and waits) is bounded by `config.timeout_ms` (0 = no deadline).
 pub(crate) async fn send_with_retry<F>(
-    config: &SdkConfig,
+    config: &Config,
     build: F,
-) -> Result<reqwest::Response, SdkError>
+) -> Result<reqwest::Response, Error>
 where
     F: Fn() -> reqwest::RequestBuilder,
 {
@@ -208,15 +206,15 @@ where
                     let bail = !resp.status().is_server_error();
                     let status = resp.status().as_u16();
                     let error = match resp.error_for_status() {
-                        Err(e) => SdkError::HttpError(e),
-                        Ok(_) => SdkError::HttpStatus(status),
+                        Err(e) => Error::HttpError(e),
+                        Ok(_) => Error::HttpStatus(status),
                     };
                     if bail {
                         return Err(error);
                     }
                     error
                 }
-                Err(e) => SdkError::HttpError(e),
+                Err(e) => Error::HttpError(e),
             };
             if tries >= retries {
                 return Err(error);
@@ -239,13 +237,13 @@ where
     }
     tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), attempts)
         .await
-        .unwrap_or(Err(SdkError::Timeout(timeout_ms)))
+        .unwrap_or(Err(Error::Timeout(timeout_ms)))
 }
 
 /// Add the headers the JS SDK client sends on every request: `X-API-Key`,
 /// `X-Agent`, `X-Environment`, `X-Application`, `X-Application-Version`,
 /// `Content-Type`, plus `User-Agent` when an agent is configured.
-fn with_headers(request: reqwest::RequestBuilder, config: &SdkConfig) -> reqwest::RequestBuilder {
+fn with_headers(request: reqwest::RequestBuilder, config: &Config) -> reqwest::RequestBuilder {
     let agent = config.agent.as_deref().unwrap_or(DEFAULT_AGENT);
     let mut request = request
         .header("Content-Type", "application/json")
@@ -264,7 +262,7 @@ fn with_headers(request: reqwest::RequestBuilder, config: &SdkConfig) -> reqwest
     request
 }
 
-fn context_url(config: &SdkConfig) -> String {
+fn context_url(config: &Config) -> String {
     format!(
         "{}/context?application={}&environment={}",
         config.endpoint.trim_end_matches('/'),
@@ -275,22 +273,22 @@ fn context_url(config: &SdkConfig) -> String {
 
 /// `GET {endpoint}/context`, with the JS SDK client's headers and retries.
 pub(crate) async fn fetch_context(
-    client: &Client,
-    config: &SdkConfig,
-) -> Result<ContextData, SdkError> {
+    client: &HttpClient,
+    config: &Config,
+) -> Result<ContextData, Error> {
     let url = context_url(config);
     let resp = send_with_retry(config, || with_headers(client.get(&url), config)).await?;
     Ok(resp.json().await?)
 }
 
-impl Sdk {
-    pub fn builder() -> SdkBuilder {
-        SdkBuilder::new()
+impl Client {
+    pub fn builder() -> ClientBuilder {
+        ClientBuilder::new()
     }
 
-    /// Build an SDK from an [`SdkConfig`]; unset `timeout_ms` and `retries`
+    /// Build an SDK from an [`Config`]; unset `timeout_ms` and `retries`
     /// use the defaults (3000ms, 5 retries).
-    pub fn from_config(config: SdkConfig) -> Result<Self, SdkError> {
+    pub fn from_config(config: Config) -> Result<Self, Error> {
         let mut builder = Self::builder()
             .endpoint(config.endpoint)
             .api_key(config.api_key)
@@ -313,7 +311,7 @@ impl Sdk {
         api_key: impl Into<String>,
         application: impl Into<String>,
         environment: impl Into<String>,
-    ) -> Result<Self, SdkError> {
+    ) -> Result<Self, Error> {
         Self::builder()
             .endpoint(endpoint)
             .api_key(api_key)
@@ -325,20 +323,20 @@ impl Sdk {
     /// Fetch context data and create a ready context.
     ///
     /// Returns `Err` when the data cannot be fetched. Use
-    /// [`Sdk::create_context_or_failed`] to get a failed context instead,
+    /// [`Client::create_context_or_failed`] to get a failed context instead,
     /// with the cause in [`Context::ready_error`] and an `error` event.
     pub async fn create_context<I, K, V>(
         &self,
         units: I,
         options: Option<ContextOptions>,
-    ) -> Result<Context, SdkError>
+    ) -> Result<Context, Error>
     where
         I: IntoIterator<Item = (K, V)>,
         K: Into<String>,
         V: Into<serde_json::Value>,
     {
         let units_vec = collect_units(units);
-        validate_units(&units_vec).map_err(SdkError::ConfigError)?;
+        validate_units(&units_vec).map_err(Error::ConfigError)?;
         let data = self.fetch_context_data().await?;
         Ok(self.build_context(units_vec, Ok(data), options))
     }
@@ -367,7 +365,7 @@ impl Sdk {
         self.build_context(units_vec, data, options)
     }
 
-    async fn fetch_context_data(&self) -> Result<ContextData, SdkError> {
+    async fn fetch_context_data(&self) -> Result<ContextData, Error> {
         fetch_context(&self.client, &self.config).await
     }
 
@@ -427,7 +425,7 @@ impl Sdk {
         context
     }
 
-    pub async fn publish(&self, params: &PublishParams) -> Result<(), SdkError> {
+    pub async fn publish(&self, params: &PublishParams) -> Result<(), Error> {
         send_publish(&self.client, &self.config, params).await
     }
 }
@@ -457,14 +455,14 @@ where
 
 /// A client for use inside [`run_blocking`]; a client created on another
 /// runtime must not be reused because its pooled connections belong to it.
-pub(crate) fn blocking_client(timeout_ms: u64) -> Result<Client, String> {
+pub(crate) fn blocking_client(timeout_ms: u64) -> Result<HttpClient, String> {
     client_builder(timeout_ms)
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))
 }
 
 fn client_builder(timeout_ms: u64) -> reqwest::ClientBuilder {
-    let builder = Client::builder();
+    let builder = HttpClient::builder();
     if timeout_ms == 0 {
         builder
     } else {
@@ -496,13 +494,13 @@ where
 }
 
 /// Send `PUT {endpoint}/context` with the JS SDK client's headers and
-/// retries. Shared by [`Sdk::publish`] and the `DefaultContextPublisher`,
+/// retries. Shared by [`Client::publish`] and the `DefaultContextPublisher`,
 /// so both send the same request.
 pub(crate) async fn send_publish(
-    client: &Client,
-    config: &SdkConfig,
+    client: &HttpClient,
+    config: &Config,
     params: &PublishParams,
-) -> Result<(), SdkError> {
+) -> Result<(), Error> {
     let url = format!("{}/context", config.endpoint.trim_end_matches('/'));
     send_with_retry(config, || {
         with_headers(client.put(&url), config).json(params)
@@ -524,35 +522,35 @@ mod tests {
 
     #[test]
     fn test_sdk_config_validation() {
-        assert!(Sdk::builder()
+        assert!(Client::builder()
             .api_key("key")
             .application("app")
             .environment("env")
             .build()
             .is_err());
 
-        assert!(Sdk::builder()
+        assert!(Client::builder()
             .endpoint("endpoint")
             .application("app")
             .environment("env")
             .build()
             .is_err());
 
-        assert!(Sdk::builder()
+        assert!(Client::builder()
             .endpoint("endpoint")
             .api_key("key")
             .environment("env")
             .build()
             .is_err());
 
-        assert!(Sdk::builder()
+        assert!(Client::builder()
             .endpoint("endpoint")
             .api_key("key")
             .application("app")
             .build()
             .is_err());
 
-        assert!(Sdk::builder()
+        assert!(Client::builder()
             .endpoint("endpoint")
             .api_key("key")
             .application("app")
@@ -563,7 +561,7 @@ mod tests {
 
     #[test]
     fn test_builder_pattern() {
-        let sdk = Sdk::builder()
+        let sdk = Client::builder()
             .endpoint("https://test.absmartly.io/v1")
             .api_key("test-api-key")
             .application("test-app")
@@ -586,7 +584,7 @@ mod tests {
 
     #[test]
     fn test_create_context_with_array_of_tuples() {
-        let sdk = Sdk::new(
+        let sdk = Client::new(
             "https://test.absmartly.io/v1",
             "test-api-key",
             "test-app",
@@ -613,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_create_context_with_vec_of_tuples() {
-        let sdk = Sdk::new(
+        let sdk = Client::new(
             "https://test.absmartly.io/v1",
             "test-api-key",
             "test-app",
@@ -641,7 +639,7 @@ mod tests {
 
     #[test]
     fn test_create_context_with_hashmap() {
-        let sdk = Sdk::new(
+        let sdk = Client::new(
             "https://test.absmartly.io/v1",
             "test-api-key",
             "test-app",
@@ -668,7 +666,7 @@ mod tests {
 
     #[test]
     fn test_create_context_with_single_unit() {
-        let sdk = Sdk::new(
+        let sdk = Client::new(
             "https://test.absmartly.io/v1",
             "test-api-key",
             "test-app",
@@ -687,7 +685,7 @@ mod tests {
 
     #[test]
     fn test_sdk_config_new() {
-        let config = SdkConfig::new("endpoint", "key", "app", "env");
+        let config = Config::new("endpoint", "key", "app", "env");
         assert_eq!(config.endpoint, "endpoint");
         assert_eq!(config.api_key, "key");
         assert_eq!(config.application, "app");
@@ -699,25 +697,25 @@ mod tests {
 
     #[test]
     fn test_sdk_config_with_agent() {
-        let config = SdkConfig::new("endpoint", "key", "app", "env").with_agent("test-agent");
+        let config = Config::new("endpoint", "key", "app", "env").with_agent("test-agent");
         assert_eq!(config.agent, Some("test-agent".to_string()));
     }
 
     #[test]
     fn test_sdk_config_with_timeout() {
-        let config = SdkConfig::new("endpoint", "key", "app", "env").with_timeout(5000);
+        let config = Config::new("endpoint", "key", "app", "env").with_timeout(5000);
         assert_eq!(config.timeout_ms, Some(5000));
     }
 
     #[test]
     fn test_sdk_config_with_retries() {
-        let config = SdkConfig::new("endpoint", "key", "app", "env").with_retries(10);
+        let config = Config::new("endpoint", "key", "app", "env").with_retries(10);
         assert_eq!(config.retries, Some(10));
     }
 
     #[test]
     fn test_builder_default_timeout() {
-        let sdk = Sdk::builder()
+        let sdk = Client::builder()
             .endpoint("https://test.absmartly.io/v1")
             .api_key("key")
             .application("app")
@@ -729,7 +727,7 @@ mod tests {
 
     #[test]
     fn test_builder_default_retries() {
-        let sdk = Sdk::builder()
+        let sdk = Client::builder()
             .endpoint("https://test.absmartly.io/v1")
             .api_key("key")
             .application("app")
@@ -741,7 +739,7 @@ mod tests {
 
     #[test]
     fn test_builder_static_method() {
-        let sdk = Sdk::builder()
+        let sdk = Client::builder()
             .endpoint("https://test.absmartly.io/v1")
             .api_key("key")
             .application("app")
@@ -752,7 +750,7 @@ mod tests {
 
     #[test]
     fn test_new_convenience_method() {
-        let sdk = Sdk::new(
+        let sdk = Client::new(
             "https://test.absmartly.io/v1",
             "test-api-key",
             "test-app",
@@ -763,7 +761,7 @@ mod tests {
 
     #[test]
     fn test_create_context_with_context_is_ready() {
-        let sdk = Sdk::new(
+        let sdk = Client::new(
             "https://test.absmartly.io/v1",
             "test-api-key",
             "test-app",
@@ -778,7 +776,7 @@ mod tests {
 
     #[test]
     fn test_create_context_with_empty_units() {
-        let sdk = Sdk::new(
+        let sdk = Client::new(
             "https://test.absmartly.io/v1",
             "test-api-key",
             "test-app",
@@ -795,16 +793,16 @@ mod tests {
 
     #[test]
     fn test_from_config_builds_and_rejects_empty_fields() {
-        let config = SdkConfig::new("https://x.absmartly.io/v1", "key", "web", "prod")
+        let config = Config::new("https://x.absmartly.io/v1", "key", "web", "prod")
             .with_timeout(1000)
             .with_retries(2);
-        assert!(Sdk::from_config(config).is_ok());
-        assert!(Sdk::from_config(SdkConfig::new("", "key", "web", "prod")).is_err());
+        assert!(Client::from_config(config).is_ok());
+        assert!(Client::from_config(Config::new("", "key", "web", "prod")).is_err());
     }
 
     #[test]
     fn test_sdk_error_display() {
-        let err = SdkError::ConfigError("test error".to_string());
+        let err = Error::ConfigError("test error".to_string());
         assert_eq!(format!("{}", err), "Invalid configuration: test error");
     }
 
@@ -824,7 +822,7 @@ mod tests {
 
     #[test]
     fn test_builder_empty_fields_rejected() {
-        assert!(Sdk::builder()
+        assert!(Client::builder()
             .endpoint("")
             .api_key("key")
             .application("app")
@@ -832,7 +830,7 @@ mod tests {
             .build()
             .is_err());
 
-        assert!(Sdk::builder()
+        assert!(Client::builder()
             .endpoint("endpoint")
             .api_key("")
             .application("app")
@@ -840,7 +838,7 @@ mod tests {
             .build()
             .is_err());
 
-        assert!(Sdk::builder()
+        assert!(Client::builder()
             .endpoint("endpoint")
             .api_key("key")
             .application("")
@@ -848,7 +846,7 @@ mod tests {
             .build()
             .is_err());
 
-        assert!(Sdk::builder()
+        assert!(Client::builder()
             .endpoint("endpoint")
             .api_key("key")
             .application("app")

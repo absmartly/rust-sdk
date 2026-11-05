@@ -7,7 +7,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use absmartly::{ContextOptions, Sdk};
+use absmartly::{Client, ContextOptions};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -148,8 +148,8 @@ async fn start_server(plan: Plan) -> Server {
     Server { base, requests }
 }
 
-fn sdk(base: &str) -> Sdk {
-    Sdk::builder()
+fn sdk(base: &str) -> Client {
+    Client::builder()
         .endpoint(base)
         .api_key("test-api-key")
         .application("www")
@@ -160,8 +160,8 @@ fn sdk(base: &str) -> Sdk {
         .unwrap()
 }
 
-fn retrying_sdk(base: &str, retries: u32, timeout_ms: u64) -> Sdk {
-    Sdk::builder()
+fn retrying_sdk(base: &str, retries: u32, timeout_ms: u64) -> Client {
+    Client::builder()
         .endpoint(base)
         .api_key("test-api-key")
         .application("www")

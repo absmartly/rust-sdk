@@ -1,7 +1,7 @@
-use reqwest::Client;
+use reqwest::Client as HttpClient;
 
 use crate::models::PublishParams;
-use crate::sdk::{blocking_client, run_blocking, send_publish, SdkConfig};
+use crate::sdk::{blocking_client, run_blocking, send_publish, Config};
 
 /// Delivers a context's pending events to the ABsmartly collector.
 pub trait ContextPublisher: Send + Sync {
@@ -12,28 +12,28 @@ pub trait ContextPublisher: Send + Sync {
     fn publish(&self, params: &PublishParams) -> Result<(), String>;
 }
 
-/// The publisher installed by `Sdk` on every context it creates. It sends
-/// `PUT {endpoint}/context` with the same request as [`crate::Sdk::publish`].
+/// The publisher installed by `Client` on every context it creates. It sends
+/// `PUT {endpoint}/context` with the same request as [`crate::Client::publish`].
 ///
 /// The request runs to completion on a dedicated thread with its own runtime,
 /// so this works on any tokio runtime flavor (or none) and never panics. A
 /// failed delivery is returned as `Err` and the events stay pending.
 pub struct DefaultContextPublisher {
-    config: SdkConfig,
+    config: Config,
 }
 
 impl DefaultContextPublisher {
     pub fn new(endpoint: impl Into<String>, api_key: impl Into<String>) -> Self {
-        let config = SdkConfig::new(endpoint, api_key, "", "");
+        let config = Config::new(endpoint, api_key, "", "");
         let timeout = std::time::Duration::from_millis(config.timeout_ms.unwrap_or(3000));
-        let client = Client::builder()
+        let client = HttpClient::builder()
             .timeout(timeout)
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .unwrap_or_else(|_| HttpClient::new());
         Self::from_config(config, client)
     }
 
-    pub(crate) fn from_config(config: SdkConfig, client: Client) -> Self {
+    pub(crate) fn from_config(config: Config, client: HttpClient) -> Self {
         let _ = client;
         Self { config }
     }

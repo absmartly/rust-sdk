@@ -11,7 +11,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use absmartly::{ContextOptions, Sdk};
+use absmartly::{Client, ContextOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -156,7 +156,7 @@ async fn real_http_get_and_put_against_local_server() {
     let application = "www";
     let environment = "production";
 
-    let sdk = Sdk::builder()
+    let sdk = Client::builder()
         .endpoint(&base)
         .api_key(api_key)
         .application(application)
@@ -312,7 +312,7 @@ async fn publish_returns_error_on_final_3xx_response() {
         }
     });
 
-    let sdk = Sdk::builder()
+    let sdk = Client::builder()
         .endpoint(&base)
         .api_key("k")
         .application("www")
