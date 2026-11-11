@@ -3690,7 +3690,6 @@ mod tests {
         let mut context =
             context_with_system_attrs(staging_exp, Some("website"), Some("production"));
 
-        // Before the override, the staging filter does not match production.
         assert_eq!(context.peek("test_exp").unwrap(), 0);
 
         // Setting the attribute after the assignment was cached invalidates it;
@@ -3699,7 +3698,7 @@ mod tests {
         assert_eq!(context.treatment("test_exp").unwrap(), 1);
         assert!(!audience_mismatch(&context, "test_exp"));
 
-        // And a production filter no longer matches with the user override in place.
+        // With the user override in place, a production filter no longer matches.
         let prod_exp = {
             let mut e = make_audience_experiment(
                 r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
@@ -3806,7 +3805,8 @@ mod tests {
         assert_eq!(context.peek("test_exp").unwrap(), 0);
         assert!(audience_mismatch(&context, "test_exp"));
 
-        // Setting the identical values again is a no-op and keeps the cache.
+        // Switching the environment back to production invalidates the cache
+        // again, so the production filter matches once more.
         context.set_system_attributes(Some("website"), Some("production"));
         assert_eq!(context.peek("test_exp").unwrap(), 1);
         assert!(!audience_mismatch(&context, "test_exp"));
