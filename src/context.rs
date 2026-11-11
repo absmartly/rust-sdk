@@ -163,10 +163,16 @@ impl Context {
     /// can target them. These are not stored as user attributes: they seed the
     /// evaluation map and any user attribute of the same name overrides them.
     /// Empty names are ignored, so the key is simply absent when nothing is
-    /// configured.
+    /// configured. Changing a stored value bumps the attribute sequence, so a
+    /// previously cached assignment is re-evaluated against the new value.
     pub fn set_system_attributes(&mut self, application: Option<&str>, environment: Option<&str>) {
-        self.application = application.filter(|s| !s.is_empty()).map(|s| s.to_string());
-        self.environment = environment.filter(|s| !s.is_empty()).map(|s| s.to_string());
+        let application = application.filter(|s| !s.is_empty()).map(|s| s.to_string());
+        let environment = environment.filter(|s| !s.is_empty()).map(|s| s.to_string());
+        if application != self.application || environment != self.environment {
+            self.application = application;
+            self.environment = environment;
+            self.attrs_seq += 1;
+        }
     }
 
     pub fn publish_delay(&self) -> i64 {
@@ -3781,6 +3787,29 @@ mod tests {
 
         assert_eq!(context.treatment("test_exp").unwrap(), 0);
         assert!(audience_mismatch(&context, "test_exp"));
+    }
+
+    #[test]
+    fn test_changing_system_attributes_invalidates_cached_assignment() {
+        let exp = make_audience_experiment(
+            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
+        );
+        let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
+
+        // Cache a matching assignment for the production environment.
+        assert_eq!(context.peek("test_exp").unwrap(), 1);
+        assert!(!audience_mismatch(&context, "test_exp"));
+
+        // Re-pointing the context at a different environment must invalidate the
+        // cached assignment, so the production filter no longer matches.
+        context.set_system_attributes(Some("website"), Some("staging"));
+        assert_eq!(context.peek("test_exp").unwrap(), 0);
+        assert!(audience_mismatch(&context, "test_exp"));
+
+        // Setting the identical values again is a no-op and keeps the cache.
+        context.set_system_attributes(Some("website"), Some("production"));
+        assert_eq!(context.peek("test_exp").unwrap(), 1);
+        assert!(!audience_mismatch(&context, "test_exp"));
     }
 
     #[test]
