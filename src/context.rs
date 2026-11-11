@@ -42,6 +42,8 @@ pub struct Context {
     refresh_period: i64,
     data_fetcher: Option<DataFetcher>,
     publisher: Option<Box<dyn ContextPublisher>>,
+    application: Option<String>,
+    environment: Option<String>,
 }
 
 impl Context {
@@ -70,6 +72,8 @@ impl Context {
             refresh_period: 0,
             data_fetcher: None,
             publisher: None,
+            application: None,
+            environment: None,
         }
     }
 
@@ -153,6 +157,16 @@ impl Context {
 
     pub fn set_publisher(&mut self, publisher: Box<dyn ContextPublisher>) {
         self.publisher = Some(publisher);
+    }
+
+    /// Record the client's `application` and `environment` names so audiences
+    /// can target them. These are not stored as user attributes: they seed the
+    /// evaluation map and any user attribute of the same name overrides them.
+    /// Empty names are ignored, so the key is simply absent when nothing is
+    /// configured.
+    pub fn set_system_attributes(&mut self, application: Option<&str>, environment: Option<&str>) {
+        self.application = application.filter(|s| !s.is_empty()).map(|s| s.to_string());
+        self.environment = environment.filter(|s| !s.is_empty()).map(|s| s.to_string());
     }
 
     pub fn publish_delay(&self) -> i64 {
@@ -348,6 +362,33 @@ impl Context {
 
     pub fn get_attributes(&self) -> HashMap<String, Value> {
         let mut attrs = HashMap::new();
+        for attr in &self.attrs {
+            attrs.insert(attr.name.clone(), attr.value.clone());
+        }
+        attrs
+    }
+
+    /// The attribute map audiences are evaluated against: the client's
+    /// `application` and `environment` names first (when configured and
+    /// non-empty), then every user-set attribute overlaid on top so a user
+    /// value of the same name always wins, including one set after the context
+    /// was created. Because this folds in the current attributes, a later
+    /// `set_attribute` bumps `attrs_seq` and invalidates any cached
+    /// assignment, which is then re-evaluated against the new map.
+    fn evaluation_attributes(&self) -> HashMap<String, Value> {
+        let mut attrs = HashMap::new();
+        if let Some(ref application) = self.application {
+            attrs.insert(
+                "application".to_string(),
+                Value::String(application.clone()),
+            );
+        }
+        if let Some(ref environment) = self.environment {
+            attrs.insert(
+                "environment".to_string(),
+                Value::String(environment.clone()),
+            );
+        }
         for attr in &self.attrs {
             attrs.insert(attr.name.clone(), attr.value.clone());
         }
@@ -829,7 +870,7 @@ impl Context {
             assignment.variant = self.overrides[experiment_name];
         } else if let Some(ref exp_data) = exp_data_opt {
             if !exp_data.audience.is_empty() {
-                let attrs = self.get_attributes();
+                let attrs = self.evaluation_attributes();
                 let result = self.audience_matcher.evaluate(&exp_data.audience, &attrs);
                 if let Some(matched) = result {
                     assignment.audience_mismatch = !matched;
@@ -915,7 +956,7 @@ impl Context {
 
     fn audience_matches(&self, experiment: &ExperimentData, assignment: &Assignment) -> bool {
         if !experiment.audience.is_empty() && self.attrs_seq > assignment.attrs_seq {
-            let attrs = self.get_attributes();
+            let attrs = self.evaluation_attributes();
             let result = self.audience_matcher.evaluate(&experiment.audience, &attrs);
             if let Some(matched) = result {
                 return matched != assignment.audience_mismatch;
@@ -3566,5 +3607,201 @@ mod tests {
 
         assert_eq!(ctx.refresh(), Err("Refresh fetch failed: boom".to_string()));
         assert_eq!(event_names(&log), vec!["error"]);
+    }
+
+    // --- System attributes (application / environment) in audience evaluation ---
+
+    /// A strict audience experiment with a 0/100 split to variant 1, so a
+    /// matching audience yields variant 1 and a mismatch yields variant 0.
+    fn make_audience_experiment(audience: &str) -> ExperimentData {
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
+        exp.audience = audience.to_string();
+        exp.audience_strict = true;
+        exp
+    }
+
+    fn context_with_system_attrs(
+        exp: ExperimentData,
+        application: Option<&str>,
+        environment: Option<&str>,
+    ) -> Context {
+        let mut context = Context::new(make_context_data(vec![exp]));
+        context.set_system_attributes(application, environment);
+        context.set_unit("session_id", "test_user").unwrap();
+        context
+    }
+
+    fn audience_mismatch(context: &Context, name: &str) -> bool {
+        context
+            .assignments
+            .get(name)
+            .map(|a| a.audience_mismatch)
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn test_system_environment_matches_strict_audience() {
+        let exp = make_audience_experiment(
+            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
+        );
+        let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
+
+        assert_eq!(context.treatment("test_exp").unwrap(), 1);
+        assert!(!audience_mismatch(&context, "test_exp"));
+    }
+
+    #[test]
+    fn test_system_application_matches_strict_audience() {
+        let exp = make_audience_experiment(
+            r#"{"filter":[{"eq":[{"var":"application"},{"value":"website"}]}]}"#,
+        );
+        let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
+
+        assert_eq!(context.treatment("test_exp").unwrap(), 1);
+        assert!(!audience_mismatch(&context, "test_exp"));
+    }
+
+    #[test]
+    fn test_system_environment_no_match_is_mismatch() {
+        let exp = make_audience_experiment(
+            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"staging"}]}]}"#,
+        );
+        let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
+
+        assert_eq!(context.treatment("test_exp").unwrap(), 0);
+        assert!(audience_mismatch(&context, "test_exp"));
+    }
+
+    #[test]
+    fn test_user_attribute_overrides_system_environment() {
+        let staging_exp = make_audience_experiment(
+            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"staging"}]}]}"#,
+        );
+        let mut context =
+            context_with_system_attrs(staging_exp, Some("website"), Some("production"));
+
+        // Before the override, the staging filter does not match production.
+        assert_eq!(context.peek("test_exp").unwrap(), 0);
+
+        // Setting the attribute after the assignment was cached invalidates it;
+        // the staging filter now matches the user value.
+        context.set_attribute("environment", "staging").unwrap();
+        assert_eq!(context.treatment("test_exp").unwrap(), 1);
+        assert!(!audience_mismatch(&context, "test_exp"));
+
+        // And a production filter no longer matches with the user override in place.
+        let prod_exp = {
+            let mut e = make_audience_experiment(
+                r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
+            );
+            e.id = 2;
+            e.name = "prod_exp".to_string();
+            e
+        };
+        let mut context2 = Context::new(make_context_data(vec![prod_exp]));
+        context2.set_system_attributes(Some("website"), Some("production"));
+        context2.set_unit("session_id", "test_user").unwrap();
+        context2.set_attribute("environment", "staging").unwrap();
+        assert_eq!(context2.treatment("prod_exp").unwrap(), 0);
+        assert!(audience_mismatch(&context2, "prod_exp"));
+    }
+
+    #[test]
+    fn test_missing_environment_config_leaves_key_absent() {
+        let exp = make_audience_experiment(
+            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
+        );
+        // No environment configured (None) and an empty application string:
+        // neither key is in the evaluation map, so the filter cannot match and
+        // nothing panics.
+        let mut context = context_with_system_attrs(exp, Some(""), None);
+
+        assert_eq!(context.treatment("test_exp").unwrap(), 0);
+        assert!(audience_mismatch(&context, "test_exp"));
+    }
+
+    #[test]
+    fn test_system_attributes_not_added_to_publish_payload() {
+        let exp = make_audience_experiment(
+            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
+        );
+        let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
+        context.treatment("test_exp").unwrap();
+
+        // The serialized payload carries no `application`/`environment` attribute
+        // entry: the collector adds those server-side, not the SDK.
+        let params = context.get_publish_params();
+        let json = serde_json::to_value(&params).unwrap();
+        let attributes = json.get("attributes");
+        assert!(
+            attributes.is_none() || attributes == Some(&Value::Null),
+            "expected no attributes in publish payload, got: {:?}",
+            attributes
+        );
+    }
+
+    #[test]
+    fn test_user_attribute_still_published_but_system_not() {
+        let exp = make_audience_experiment(
+            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
+        );
+        let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
+        context.set_attribute("country", "US").unwrap();
+        context.treatment("test_exp").unwrap();
+
+        let params = context.get_publish_params();
+        let json = serde_json::to_value(&params).unwrap();
+        let attributes = json
+            .get("attributes")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let names: Vec<&str> = attributes
+            .iter()
+            .filter_map(|a| a.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"country"));
+        assert!(!names.contains(&"application"));
+        assert!(!names.contains(&"environment"));
+    }
+
+    #[test]
+    fn test_app_version_filter_does_not_match() {
+        // `app_version` is not a system attribute this SDK injects, so a filter
+        // on it cannot match even though the client sends an application version
+        // header. A strict audience on it is a mismatch -> variant 0.
+        let exp = make_audience_experiment(
+            r#"{"filter":[{"eq":[{"var":"app_version"},{"value":"0"}]}]}"#,
+        );
+        let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
+
+        assert_eq!(context.treatment("test_exp").unwrap(), 0);
+        assert!(audience_mismatch(&context, "test_exp"));
+    }
+
+    #[test]
+    fn test_system_attributes_build_context_wires_config() {
+        // Through the public SDK entry point, the client's application and
+        // environment reach the evaluation map.
+        let sdk = crate::sdk::ABsmartly::new(
+            "https://test.absmartly.io/v1",
+            "test-api-key",
+            "website",
+            "production",
+        )
+        .unwrap();
+        let exp = make_audience_experiment(
+            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
+        );
+        let mut context = sdk.create_context_with(
+            [("session_id", "test_user")],
+            make_context_data(vec![exp]),
+            None,
+        );
+        assert_eq!(context.treatment("test_exp").unwrap(), 1);
     }
 }
