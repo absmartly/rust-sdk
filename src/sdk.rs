@@ -390,6 +390,10 @@ impl Client {
         options: Option<ContextOptions>,
     ) -> Context {
         let mut context = Context::new_loading_with_options(options.unwrap_or_default());
+        context.set_system_attributes(
+            Some(&self.config.application),
+            Some(&self.config.environment),
+        );
         // An invalid unit must not yield a usable context with a partial
         // identity: the context is failed instead, with the cause attached.
         let mut data = data;
