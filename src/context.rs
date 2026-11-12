@@ -883,8 +883,6 @@ impl Context {
                 || !has_custom
                 || self.cassignments[experiment_name] == cached.variant
             {
-                // A matching rule wins over a custom assignment, so a custom
-                // change is not staleness.
                 let cached = cached.clone();
                 if let Some(exp) = self.index.get(experiment_name) {
                     let fresh = Self::experiment_matches(&exp.data, &cached)
@@ -1111,8 +1109,6 @@ impl Context {
     }
 
     fn audience_matches(&self, experiment: &ExperimentData, assignment: &Assignment) -> bool {
-        // A rule-won assignment never consulted the audience, so an audience
-        // change cannot make it stale.
         if assignment.rule_override {
             return true;
         }
@@ -3773,8 +3769,6 @@ mod tests {
         assert_eq!(event_names(&log), vec!["error"]);
     }
 
-    // --- System attributes (application / environment) in audience evaluation ---
-
     /// A strict audience experiment with a 0/100 split to variant 1, so a
     /// matching audience yields variant 1 and a mismatch yields variant 0.
     fn make_audience_experiment(audience: &str) -> ExperimentData {
@@ -3850,13 +3844,10 @@ mod tests {
 
         assert_eq!(context.peek("test_exp").unwrap(), 0);
 
-        // Setting the attribute after the assignment was cached invalidates it;
-        // the staging filter now matches the user value.
         context.set_attribute("environment", "staging").unwrap();
         assert_eq!(context.treatment("test_exp").unwrap(), 1);
         assert!(!audience_mismatch(&context, "test_exp"));
 
-        // With the user override in place, a production filter no longer matches.
         let prod_exp = {
             let mut e = make_audience_experiment(
                 r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
@@ -3878,9 +3869,6 @@ mod tests {
         let exp = make_audience_experiment(
             r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
         );
-        // No environment configured (None) and an empty application string:
-        // neither key is in the evaluation map, so the filter cannot match and
-        // nothing panics.
         let mut context = context_with_system_attrs(exp, Some(""), None);
 
         assert_eq!(context.treatment("test_exp").unwrap(), 0);
@@ -3895,8 +3883,6 @@ mod tests {
         let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
         context.treatment("test_exp").unwrap();
 
-        // The serialized payload carries no `application`/`environment` attribute
-        // entry: the collector adds those server-side, not the SDK.
         let params = context.get_publish_params();
         let json = serde_json::to_value(&params).unwrap();
         let attributes = json.get("attributes");
@@ -3934,9 +3920,6 @@ mod tests {
 
     #[test]
     fn test_app_version_filter_does_not_match() {
-        // `app_version` is not a system attribute this SDK injects, so a filter
-        // on it cannot match even though the client sends an application version
-        // header. A strict audience on it is a mismatch -> variant 0.
         let exp = make_audience_experiment(
             r#"{"filter":[{"eq":[{"var":"app_version"},{"value":"0"}]}]}"#,
         );
@@ -3953,18 +3936,13 @@ mod tests {
         );
         let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
 
-        // Cache a matching assignment for the production environment.
         assert_eq!(context.peek("test_exp").unwrap(), 1);
         assert!(!audience_mismatch(&context, "test_exp"));
 
-        // Re-pointing the context at a different environment must invalidate the
-        // cached assignment, so the production filter no longer matches.
         context.set_system_attributes(Some("website"), Some("staging"));
         assert_eq!(context.peek("test_exp").unwrap(), 0);
         assert!(audience_mismatch(&context, "test_exp"));
 
-        // Switching the environment back to production invalidates the cache
-        // again, so the production filter matches once more.
         context.set_system_attributes(Some("website"), Some("production"));
         assert_eq!(context.peek("test_exp").unwrap(), 1);
         assert!(!audience_mismatch(&context, "test_exp"));
@@ -3972,8 +3950,6 @@ mod tests {
 
     #[test]
     fn test_system_attributes_build_context_wires_config() {
-        // Through the public SDK entry point, the client's application and
-        // environment reach the evaluation map.
         let sdk = crate::sdk::Client::new(
             "https://test.absmartly.io/v1",
             "test-api-key",

@@ -193,24 +193,20 @@ fn semver_compared(
     })
 }
 
-pub fn semver_eq_op(evaluator: &Evaluator, args: &Value) -> Value {
-    semver_compared(evaluator, args, |o| o.is_eq())
+macro_rules! semver_op {
+    ($($name:ident => $test:ident),* $(,)?) => {$(
+        pub fn $name(evaluator: &Evaluator, args: &Value) -> Value {
+            semver_compared(evaluator, args, std::cmp::Ordering::$test)
+        }
+    )*};
 }
 
-pub fn semver_gt_op(evaluator: &Evaluator, args: &Value) -> Value {
-    semver_compared(evaluator, args, |o| o.is_gt())
-}
-
-pub fn semver_gte_op(evaluator: &Evaluator, args: &Value) -> Value {
-    semver_compared(evaluator, args, |o| o.is_ge())
-}
-
-pub fn semver_lt_op(evaluator: &Evaluator, args: &Value) -> Value {
-    semver_compared(evaluator, args, |o| o.is_lt())
-}
-
-pub fn semver_lte_op(evaluator: &Evaluator, args: &Value) -> Value {
-    semver_compared(evaluator, args, |o| o.is_le())
+semver_op! {
+    semver_eq_op => is_eq,
+    semver_gt_op => is_gt,
+    semver_gte_op => is_ge,
+    semver_lt_op => is_lt,
+    semver_lte_op => is_le,
 }
 
 #[cfg(test)]
