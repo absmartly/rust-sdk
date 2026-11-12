@@ -14,6 +14,8 @@ Audiences now always evaluate against the client's `application` and `environmen
 
 **This changes assignment for running experiments.** A unit whose experiment has Audience enforced (`audienceStrict`) and an `environment` or `application` condition currently gets variant 0, because the SDK never supplied those attributes, so the condition never matched. After upgrading, that unit is randomised normally. Those experiments are broken today; this fixes them, but the assignment they produce will change.
 
+Custom assignment rules are applied: an experiment's `assignmentRules` are evaluated in order and the first matching rule wins over the audience, traffic allocation and custom assignments (`set_override()` still wins over every rule). See [Assignment Rules](#assignment-rules). Audiences and rule conditions also gained the `semver_eq`, `semver_gt`, `semver_gte`, `semver_lt` and `semver_lte` operators. The `X-Agent` header is now `absmartly-rust-sdk/<version>` (exported as `absmartly::SDK_AGENT`) instead of the configured agent; a configured `agent` is still sent as `User-Agent`. `Exposure` gained `rule_override` and `ExperimentData` gained `assignment_rules`, so code building these structs literally must set them.
+
 The ABsmartly Rust SDK is compatible with Rust 2021 edition and later. It uses async/await with [tokio](https://tokio.rs/) for network operations and provides a synchronous interface for variant assignment and goal tracking.
 
 ## Installation
@@ -85,7 +87,7 @@ let client = Client::new(
 | application             | `String`                          |  &#9989;  | `""`        | The name of the application where the SDK is installed. Applications are created on the Web Console and should match the applications where your experiments will be running. |
 | retries                 | `u32`                             |  &#10060; | `5`         | Number of retry attempts for failed HTTP requests                                                                                                                             |
 | timeout_ms              | `u64`                             |  &#10060; | `3000`      | Connection timeout in milliseconds                                                                                                                                            |
-| agent                   | `Option<String>`                  |  &#10060; | `None`      | Custom user agent string                                                                                                                                                      |
+| agent                   | `Option<String>`                  |  &#10060; | `None`      | Custom `User-Agent` string. The `X-Agent` header is always `absmartly-rust-sdk/<version>`                                                                                     |
 
 ## Creating a New Context
 
@@ -240,6 +242,17 @@ context.set_attributes([
     ("customer_age", "new_customer"),
 ])?;
 ```
+
+Audiences are also evaluated against the client's `application` and `environment` names; an attribute you set with the same name overrides them. Version attributes can be compared with the `semver_eq`, `semver_gt`, `semver_gte`, `semver_lt` and `semver_lte` operators, which ignore a leading `v` and build metadata and order pre-releases below their release (`1.0.0-rc.1` < `1.0.0` < `1.10.0`).
+
+### Assignment Rules
+
+Experiments can carry assignment rules, configured in the Web Console. They are evaluated in order, and the first rule whose environments include the client's environment and whose conditions match the context attributes decides the variant:
+
+- an `assign` rule gives a fixed variant;
+- a `split` rule randomizes the unit over its own percentages (for example `"20/80"`). Until the experiment's unit is set, it gives the full-on variant; setting the unit re-randomizes it unless that variant was already exposed.
+
+A matching rule wins over the audience, traffic allocation and custom assignments, and its exposures are flagged `rule_override` so they can be excluded from analysis. `set_override()` still wins over every rule. If the first matching rule's variant is out of range, or its split does not have one percentage per variant, normal assignment applies. Changing an attribute, or a refresh that changes the rules, re-evaluates them.
 
 ### Custom Assignments
 
