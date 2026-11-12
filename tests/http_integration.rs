@@ -248,10 +248,8 @@ async fn real_http_get_and_put_against_local_server() {
         Some("application/json"),
         "PUT must declare Content-Type: application/json"
     );
-    let agent = put
-        .header("X-Agent")
-        .expect("PUT must carry an X-Agent (the configured agent)");
-    assert!(!agent.is_empty(), "X-Agent must be non-empty");
+    let agent = put.header("X-Agent").expect("PUT must carry an X-Agent");
+    assert_eq!(agent, absmartly::SDK_AGENT);
 
     // Body JSON fields required by the wire contract.
     let body: serde_json::Value =

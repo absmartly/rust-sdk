@@ -164,7 +164,13 @@ pub enum Error {
     HttpStatus(u16),
 }
 
-const DEFAULT_AGENT: &str = "absmartly-rust-sdk";
+/// The SDK name, e.g. `absmartly-rust-sdk`.
+pub const SDK_NAME: &str = "absmartly-rust-sdk";
+/// The SDK version, the crate version from `Cargo.toml`.
+pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The value sent as the `X-Agent` header: `<name>/<version>`, e.g.
+/// `absmartly-rust-sdk/0.2.0`.
+pub const SDK_AGENT: &str = concat!("absmartly-rust-sdk/", env!("CARGO_PKG_VERSION"));
 const RETRY_DELAY_MS: u64 = 50;
 
 /// Delay before retry number `tries + 1`: `2^tries * 50ms` (exponent capped
@@ -241,14 +247,14 @@ where
 }
 
 /// Add the headers the JS SDK client sends on every request: `X-API-Key`,
-/// `X-Agent`, `X-Environment`, `X-Application`, `X-Application-Version`,
-/// `Content-Type`, plus `User-Agent` when an agent is configured.
+/// `X-Agent` ([`SDK_AGENT`], `absmartly-rust-sdk/<version>`), `X-Environment`,
+/// `X-Application`, `X-Application-Version`, `Content-Type`, plus
+/// `User-Agent` when an agent is configured.
 fn with_headers(request: reqwest::RequestBuilder, config: &Config) -> reqwest::RequestBuilder {
-    let agent = config.agent.as_deref().unwrap_or(DEFAULT_AGENT);
     let mut request = request
         .header("Content-Type", "application/json")
         .header("X-API-Key", &config.api_key)
-        .header("X-Agent", agent)
+        .header("X-Agent", SDK_AGENT)
         .header("X-Application-Version", "0");
     if !config.application.is_empty() {
         request = request.header("X-Application", &config.application);
@@ -517,6 +523,13 @@ pub(crate) async fn send_publish(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn test_sdk_agent_is_name_slash_crate_version() {
+        assert_eq!(SDK_NAME, "absmartly-rust-sdk");
+        assert_eq!(SDK_VERSION, env!("CARGO_PKG_VERSION"));
+        assert_eq!(SDK_AGENT, format!("{}/{}", SDK_NAME, SDK_VERSION));
+    }
 
     fn make_context_data() -> ContextData {
         ContextData {

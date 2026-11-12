@@ -154,7 +154,7 @@ fn sdk(base: &str) -> Client {
         .api_key("test-api-key")
         .application("www")
         .environment("production")
-        .agent("absmartly-rust-sdk")
+        .agent("my-app/1.0")
         .retries(0)
         .build()
         .unwrap()
@@ -166,7 +166,7 @@ fn retrying_sdk(base: &str, retries: u32, timeout_ms: u64) -> Client {
         .api_key("test-api-key")
         .application("www")
         .environment("production")
-        .agent("absmartly-rust-sdk")
+        .agent("my-app/1.0")
         .retries(retries)
         .timeout(timeout_ms)
         .build()
@@ -190,8 +190,8 @@ fn assert_js_headers(request: &Request) {
     assert_eq!(request.header("X-Application"), Some("www"));
     assert_eq!(request.header("X-Environment"), Some("production"));
     assert_eq!(request.header("X-Application-Version"), Some("0"));
-    assert_eq!(request.header("X-Agent"), Some("absmartly-rust-sdk"));
-    assert_eq!(request.header("User-Agent"), Some("absmartly-rust-sdk"));
+    assert_eq!(request.header("X-Agent"), Some(absmartly::SDK_AGENT));
+    assert_eq!(request.header("User-Agent"), Some("my-app/1.0"));
     assert_eq!(request.header("Content-Type"), Some("application/json"));
 }
 
@@ -340,7 +340,7 @@ async fn context_publish_sends_canonical_headers() {
     assert_eq!(put.header("X-Application"), Some("www"));
     assert_eq!(put.header("X-Environment"), Some("production"));
     assert_eq!(put.header("X-Application-Version"), Some("0"));
-    assert_eq!(put.header("X-Agent"), Some("absmartly-rust-sdk"));
+    assert_eq!(put.header("X-Agent"), Some(absmartly::SDK_AGENT));
     assert_eq!(put.header("Content-Type"), Some("application/json"));
 }
 
