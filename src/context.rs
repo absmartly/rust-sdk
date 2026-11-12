@@ -3816,7 +3816,7 @@ mod tests {
     fn test_system_attributes_build_context_wires_config() {
         // Through the public SDK entry point, the client's application and
         // environment reach the evaluation map.
-        let sdk = crate::sdk::ABsmartly::new(
+        let sdk = crate::sdk::Client::new(
             "https://test.absmartly.io/v1",
             "test-api-key",
             "website",
