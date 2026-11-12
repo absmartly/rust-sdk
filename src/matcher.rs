@@ -105,20 +105,6 @@ fn as_variant(value: &Value) -> Option<i32> {
     Some(d as i32)
 }
 
-fn parse_rule_action(rule: &serde_json::Map<String, Value>) -> Option<RuleAction> {
-    match rule.get("type").and_then(Value::as_str) {
-        Some("assign") => rule
-            .get("variant")
-            .and_then(as_variant)
-            .map(RuleAction::Assign),
-        Some("split") => rule
-            .get("percentages")
-            .and_then(parse_split_percentages)
-            .map(RuleAction::Split),
-        _ => None,
-    }
-}
-
 pub struct AudienceMatcher {
     json_expr: JsonExpr,
 }
@@ -190,7 +176,18 @@ impl AudienceMatcher {
             let Value::Object(rule) = rule else {
                 continue;
             };
-            let Some(action) = parse_rule_action(rule) else {
+            let action = match rule.get("type").and_then(Value::as_str) {
+                Some("assign") => rule
+                    .get("variant")
+                    .and_then(as_variant)
+                    .map(RuleAction::Assign),
+                Some("split") => rule
+                    .get("percentages")
+                    .and_then(parse_split_percentages)
+                    .map(RuleAction::Split),
+                _ => None,
+            };
+            let Some(action) = action else {
                 continue;
             };
 

@@ -46,8 +46,9 @@ pub struct Context {
     refresh_period: i64,
     data_fetcher: Option<DataFetcher>,
     publisher: Option<Box<dyn ContextPublisher>>,
-    application: Option<String>,
-    environment: Option<String>,
+    /// The client's `application` and `environment` names, seeded under
+    /// user attributes when evaluating audiences and rules.
+    system_attrs: HashMap<String, Value>,
 }
 
 impl Context {
@@ -76,8 +77,7 @@ impl Context {
             refresh_period: 0,
             data_fetcher: None,
             publisher: None,
-            application: None,
-            environment: None,
+            system_attrs: HashMap::new(),
         }
     }
 
@@ -170,11 +170,17 @@ impl Context {
     /// configured. Changing a stored value bumps the attribute sequence, so a
     /// previously cached assignment is re-evaluated against the new value.
     pub fn set_system_attributes(&mut self, application: Option<&str>, environment: Option<&str>) {
-        let application = application.filter(|s| !s.is_empty()).map(|s| s.to_string());
-        let environment = environment.filter(|s| !s.is_empty()).map(|s| s.to_string());
-        if application != self.application || environment != self.environment {
-            self.application = application;
-            self.environment = environment;
+        let system_attrs: HashMap<String, Value> =
+            [("application", application), ("environment", environment)]
+                .into_iter()
+                .filter_map(|(name, value)| {
+                    value
+                        .filter(|v| !v.is_empty())
+                        .map(|v| (name.to_string(), Value::from(v)))
+                })
+                .collect();
+        if system_attrs != self.system_attrs {
+            self.system_attrs = system_attrs;
             self.attrs_seq += 1;
         }
     }
@@ -408,23 +414,15 @@ impl Context {
     /// `set_attribute` bumps `attrs_seq` and invalidates any cached
     /// assignment, which is then re-evaluated against the new map.
     fn evaluation_attributes(&self) -> HashMap<String, Value> {
-        let mut attrs = HashMap::new();
-        if let Some(ref application) = self.application {
-            attrs.insert(
-                "application".to_string(),
-                Value::String(application.clone()),
-            );
-        }
-        if let Some(ref environment) = self.environment {
-            attrs.insert(
-                "environment".to_string(),
-                Value::String(environment.clone()),
-            );
-        }
+        let mut attrs = self.system_attrs.clone();
         for attr in &self.attrs {
             attrs.insert(attr.name.clone(), attr.value.clone());
         }
         attrs
+    }
+
+    fn system_environment(&self) -> Option<&str> {
+        self.system_attrs.get("environment").and_then(Value::as_str)
     }
 
     pub fn set_override(&mut self, experiment_name: &str, variant: i32) -> Result<(), String> {
@@ -887,17 +885,8 @@ impl Context {
                 if let Some(exp) = self.index.get(experiment_name) {
                     let fresh = Self::experiment_matches(&exp.data, &cached)
                         && self.audience_matches(&exp.data, &cached);
-                    let rule_key = exp.data.assignment_rules.clone();
                     if fresh && self.rule_matches(experiment_name, &cached) {
-                        // Record what the outcome was checked against, so the
-                        // rules are not re-resolved on every call.
-                        let attrs_seq = self.attrs_seq;
-                        if let Some(entry) = self.assignments.get_mut(experiment_name) {
-                            entry.rule_key = rule_key;
-                            entry.attrs_seq = attrs_seq;
-                            return entry.clone();
-                        }
-                        return cached;
+                        return self.assignments[experiment_name].clone();
                     }
                 }
             }
@@ -1045,7 +1034,7 @@ impl Context {
         let attrs = self.evaluation_attributes();
         let action =
             self.audience_matcher
-                .evaluate_rules(&rules, self.environment.as_deref(), &attrs)?;
+                .evaluate_rules(&rules, self.system_environment(), &attrs)?;
 
         match action {
             RuleAction::Assign(variant) => {
@@ -1074,27 +1063,32 @@ impl Context {
 
     /// Whether the cached assignment's rule outcome is still current. Rules
     /// are re-resolved only when they changed (a refresh) or an attribute was
-    /// set since the assignment was built.
+    /// set since the assignment was built; when still current, the cached
+    /// entry records what it was checked against so this is not repeated.
     fn rule_matches(&mut self, experiment_name: &str, assignment: &Assignment) -> bool {
         let Some(exp) = self.index.get(experiment_name) else {
             return true;
         };
-        if exp.data.assignment_rules == assignment.rule_key
-            && self.attrs_seq <= assignment.attrs_seq
-        {
-            return true;
+        let rule_key = exp.data.assignment_rules.clone();
+        if rule_key != assignment.rule_key || self.attrs_seq > assignment.attrs_seq {
+            // An exposed split resolved without its unit keeps resolving as if
+            // the unit were still missing, so a unit set afterwards cannot
+            // switch the variant the user already saw.
+            let pinned = assignment.rule_missing_unit && assignment.exposed;
+            let cached = assignment
+                .rule_override
+                .then_some((assignment.variant, assignment.rule_missing_unit));
+            if self.resolve_rule(experiment_name, pinned) != cached {
+                return false;
+            }
         }
 
-        // An exposed split resolved without its unit keeps resolving as if the
-        // unit were still missing, so a unit set afterwards cannot switch the
-        // variant the user already saw.
-        let pinned = assignment.rule_missing_unit && assignment.exposed;
-        let rule = self.resolve_rule(experiment_name, pinned);
-        let cached = assignment.rule_override.then_some(assignment.variant);
-        if rule.map(|(variant, _)| variant) != cached {
-            return false;
+        let attrs_seq = self.attrs_seq;
+        if let Some(entry) = self.assignments.get_mut(experiment_name) {
+            entry.rule_key = rule_key;
+            entry.attrs_seq = attrs_seq;
         }
-        rule.is_some_and(|(_, missing)| missing) == assignment.rule_missing_unit
+        true
     }
 
     fn experiment_matches(experiment: &ExperimentData, assignment: &Assignment) -> bool {
@@ -3793,6 +3787,18 @@ mod tests {
         context
     }
 
+    const PRODUCTION_FILTER: &str =
+        r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#;
+
+    /// A strict-audience context for the "website" app in "production".
+    fn production_context(audience: &str) -> Context {
+        context_with_system_attrs(
+            make_audience_experiment(audience),
+            Some("website"),
+            Some("production"),
+        )
+    }
+
     fn audience_mismatch(context: &Context, name: &str) -> bool {
         context
             .assignments
@@ -3802,36 +3808,31 @@ mod tests {
     }
 
     #[test]
-    fn test_system_environment_matches_strict_audience() {
-        let exp = make_audience_experiment(
-            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
-        );
-        let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
-
-        assert_eq!(context.treatment("test_exp").unwrap(), 1);
-        assert!(!audience_mismatch(&context, "test_exp"));
-    }
-
-    #[test]
-    fn test_system_application_matches_strict_audience() {
-        let exp = make_audience_experiment(
-            r#"{"filter":[{"eq":[{"var":"application"},{"value":"website"}]}]}"#,
-        );
-        let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
-
-        assert_eq!(context.treatment("test_exp").unwrap(), 1);
-        assert!(!audience_mismatch(&context, "test_exp"));
-    }
-
-    #[test]
-    fn test_system_environment_no_match_is_mismatch() {
-        let exp = make_audience_experiment(
-            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"staging"}]}]}"#,
-        );
-        let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
-
-        assert_eq!(context.treatment("test_exp").unwrap(), 0);
-        assert!(audience_mismatch(&context, "test_exp"));
+    fn test_system_attributes_in_strict_audience() {
+        for (audience, variant) in [
+            (PRODUCTION_FILTER, 1),
+            (
+                r#"{"filter":[{"eq":[{"var":"application"},{"value":"website"}]}]}"#,
+                1,
+            ),
+            (
+                r#"{"filter":[{"eq":[{"var":"environment"},{"value":"staging"}]}]}"#,
+                0,
+            ),
+            (
+                r#"{"filter":[{"eq":[{"var":"app_version"},{"value":"0"}]}]}"#,
+                0,
+            ),
+        ] {
+            let mut context = production_context(audience);
+            assert_eq!(
+                context.treatment("test_exp").unwrap(),
+                variant,
+                "{}",
+                audience
+            );
+            assert_eq!(audience_mismatch(&context, "test_exp"), variant == 0);
+        }
     }
 
     #[test]
@@ -3848,27 +3849,15 @@ mod tests {
         assert_eq!(context.treatment("test_exp").unwrap(), 1);
         assert!(!audience_mismatch(&context, "test_exp"));
 
-        let prod_exp = {
-            let mut e = make_audience_experiment(
-                r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
-            );
-            e.id = 2;
-            e.name = "prod_exp".to_string();
-            e
-        };
-        let mut context2 = Context::new(make_context_data(vec![prod_exp]));
-        context2.set_system_attributes(Some("website"), Some("production"));
-        context2.set_unit("session_id", "test_user").unwrap();
+        let mut context2 = production_context(PRODUCTION_FILTER);
         context2.set_attribute("environment", "staging").unwrap();
-        assert_eq!(context2.treatment("prod_exp").unwrap(), 0);
-        assert!(audience_mismatch(&context2, "prod_exp"));
+        assert_eq!(context2.treatment("test_exp").unwrap(), 0);
+        assert!(audience_mismatch(&context2, "test_exp"));
     }
 
     #[test]
     fn test_missing_environment_config_leaves_key_absent() {
-        let exp = make_audience_experiment(
-            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
-        );
+        let exp = make_audience_experiment(PRODUCTION_FILTER);
         let mut context = context_with_system_attrs(exp, Some(""), None);
 
         assert_eq!(context.treatment("test_exp").unwrap(), 0);
@@ -3877,10 +3866,7 @@ mod tests {
 
     #[test]
     fn test_system_attributes_not_added_to_publish_payload() {
-        let exp = make_audience_experiment(
-            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
-        );
-        let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
+        let mut context = production_context(PRODUCTION_FILTER);
         context.treatment("test_exp").unwrap();
 
         let params = context.get_publish_params();
@@ -3895,10 +3881,7 @@ mod tests {
 
     #[test]
     fn test_user_attribute_still_published_but_system_not() {
-        let exp = make_audience_experiment(
-            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
-        );
-        let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
+        let mut context = production_context(PRODUCTION_FILTER);
         context.set_attribute("country", "US").unwrap();
         context.treatment("test_exp").unwrap();
 
@@ -3919,22 +3902,8 @@ mod tests {
     }
 
     #[test]
-    fn test_app_version_filter_does_not_match() {
-        let exp = make_audience_experiment(
-            r#"{"filter":[{"eq":[{"var":"app_version"},{"value":"0"}]}]}"#,
-        );
-        let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
-
-        assert_eq!(context.treatment("test_exp").unwrap(), 0);
-        assert!(audience_mismatch(&context, "test_exp"));
-    }
-
-    #[test]
     fn test_changing_system_attributes_invalidates_cached_assignment() {
-        let exp = make_audience_experiment(
-            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
-        );
-        let mut context = context_with_system_attrs(exp, Some("website"), Some("production"));
+        let mut context = production_context(PRODUCTION_FILTER);
 
         assert_eq!(context.peek("test_exp").unwrap(), 1);
         assert!(!audience_mismatch(&context, "test_exp"));
@@ -3957,9 +3926,7 @@ mod tests {
             "production",
         )
         .unwrap();
-        let exp = make_audience_experiment(
-            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#,
-        );
+        let exp = make_audience_experiment(PRODUCTION_FILTER);
         let mut context = sdk.create_context_with(
             [("session_id", "test_user")],
             make_context_data(vec![exp]),
