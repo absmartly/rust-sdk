@@ -879,11 +879,29 @@ mod tests {
     #[test]
     fn test_semver_operators_null_operands() {
         let evaluator = make_evaluator();
-        assert_eq!(semver_eq_op(&evaluator, &json!([{"value": null}, {"value": "1"}])), Value::Null);
-        assert_eq!(semver_gt_op(&evaluator, &json!([{"value": "1"}, {"var": "missing"}])), Value::Null);
-        assert_eq!(semver_lt_op(&evaluator, &json!([{"value": ""}, {"value": "1"}])), Value::Null);
-        assert_eq!(semver_gte_op(&evaluator, &json!([{"value": [1]}, {"value": "1"}])), Value::Null);
-        assert_eq!(semver_lte_op(&evaluator, &json!({"value": "1"})), Value::Null);
-        assert_eq!(semver_eq_op(&evaluator, &json!([{"value": true}, {"value": "true"}])), json!(true));
+        assert_eq!(
+            semver_eq_op(&evaluator, &json!([{"value": null}, {"value": "1"}])),
+            Value::Null
+        );
+        assert_eq!(
+            semver_gt_op(&evaluator, &json!([{"value": "1"}, {"var": "missing"}])),
+            Value::Null
+        );
+        assert_eq!(
+            semver_lt_op(&evaluator, &json!([{"value": ""}, {"value": "1"}])),
+            Value::Null
+        );
+        assert_eq!(
+            semver_gte_op(&evaluator, &json!([{"value": [1]}, {"value": "1"}])),
+            Value::Null
+        );
+        assert_eq!(
+            semver_lte_op(&evaluator, &json!({"value": "1"})),
+            Value::Null
+        );
+        assert_eq!(
+            semver_eq_op(&evaluator, &json!([{"value": true}, {"value": "true"}])),
+            json!(true)
+        );
     }
 }
