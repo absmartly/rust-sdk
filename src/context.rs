@@ -1,11 +1,12 @@
 use log::{error, warn};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::assigner::VariantAssigner;
 use crate::context_publisher::ContextPublisher;
-use crate::matcher::AudienceMatcher;
+use crate::matcher::{AudienceMatcher, RuleAction};
 use crate::models::*;
 use crate::utils::{array_equals_shallow, hash_unit_value};
 
@@ -14,6 +15,9 @@ pub type EventLogger = Box<dyn Fn(&Context, &str, Option<Value>) + Send + Sync>;
 struct Experiment {
     data: ExperimentData,
     variables: Vec<HashMap<String, Value>>,
+    /// `data.assignment_rules` parsed once when the data is installed; `None`
+    /// when there are none or they are not valid JSON.
+    rules: Option<Arc<Vec<Value>>>,
 }
 
 pub type DataFetcher = Box<dyn Fn() -> Result<ContextData, String> + Send + Sync>;
@@ -42,6 +46,9 @@ pub struct Context {
     refresh_period: i64,
     data_fetcher: Option<DataFetcher>,
     publisher: Option<Box<dyn ContextPublisher>>,
+    /// The client's `application` and `environment` names, seeded under
+    /// user attributes when evaluating audiences and rules.
+    system_attrs: HashMap<String, Value>,
 }
 
 impl Context {
@@ -70,6 +77,7 @@ impl Context {
             refresh_period: 0,
             data_fetcher: None,
             publisher: None,
+            system_attrs: HashMap::new(),
         }
     }
 
@@ -155,6 +163,28 @@ impl Context {
         self.publisher = Some(publisher);
     }
 
+    /// Record the client's `application` and `environment` names so audiences
+    /// can target them. These are not stored as user attributes: they seed the
+    /// evaluation map and any user attribute of the same name overrides them.
+    /// Empty names are ignored, so the key is simply absent when nothing is
+    /// configured. Changing a stored value bumps the attribute sequence, so a
+    /// previously cached assignment is re-evaluated against the new value.
+    pub fn set_system_attributes(&mut self, application: Option<&str>, environment: Option<&str>) {
+        let system_attrs: HashMap<String, Value> =
+            [("application", application), ("environment", environment)]
+                .into_iter()
+                .filter_map(|(name, value)| {
+                    value
+                        .filter(|v| !v.is_empty())
+                        .map(|v| (name.to_string(), Value::from(v)))
+                })
+                .collect();
+        if system_attrs != self.system_attrs {
+            self.system_attrs = system_attrs;
+            self.attrs_seq += 1;
+        }
+    }
+
     pub fn publish_delay(&self) -> i64 {
         self.publish_delay
     }
@@ -203,11 +233,26 @@ impl Context {
                 variables.push(parsed);
             }
 
+            let rules = match self
+                .audience_matcher
+                .parse_rules(&experiment.assignment_rules)
+            {
+                Ok(rules) => rules.map(Arc::new),
+                Err(e) => {
+                    warn!(
+                        "Invalid assignmentRules JSON for experiment '{}'; its rules are ignored: {}",
+                        experiment.name, e
+                    );
+                    None
+                }
+            };
+
             self.index.insert(
                 experiment.name.clone(),
                 Experiment {
                     data: experiment.clone(),
                     variables,
+                    rules,
                 },
             );
         }
@@ -283,6 +328,13 @@ impl Context {
         }
 
         self.units.insert(unit_type.to_string(), uid);
+
+        // A split rule resolved without this unit gave the full-on variant;
+        // with the unit now available it is re-randomized, but only while that
+        // variant is still unseen.
+        self.assignments.retain(|_, a| {
+            !(a.rule_missing_unit && !a.exposed && a.unit_type.as_deref() == Some(unit_type))
+        });
         Ok(())
     }
 
@@ -352,6 +404,25 @@ impl Context {
             attrs.insert(attr.name.clone(), attr.value.clone());
         }
         attrs
+    }
+
+    /// The attribute map audiences are evaluated against: the client's
+    /// `application` and `environment` names first (when configured and
+    /// non-empty), then every user-set attribute overlaid on top so a user
+    /// value of the same name always wins, including one set after the context
+    /// was created. Because this folds in the current attributes, a later
+    /// `set_attribute` bumps `attrs_seq` and invalidates any cached
+    /// assignment, which is then re-evaluated against the new map.
+    fn evaluation_attributes(&self) -> HashMap<String, Value> {
+        let mut attrs = self.system_attrs.clone();
+        for attr in &self.attrs {
+            attrs.insert(attr.name.clone(), attr.value.clone());
+        }
+        attrs
+    }
+
+    fn system_environment(&self) -> Option<&str> {
+        self.system_attrs.get("environment").and_then(Value::as_str)
     }
 
     pub fn set_override(&mut self, experiment_name: &str, variant: i32) -> Result<(), String> {
@@ -470,7 +541,8 @@ impl Context {
                     }
 
                     if let Some(value) = variables.get(key) {
-                        if assignment.assigned || assignment.overridden {
+                        if assignment.assigned || assignment.overridden || assignment.rule_override
+                        {
                             return Ok(value.clone());
                         }
                     }
@@ -491,7 +563,8 @@ impl Context {
                 let assignment = self.assign(&exp_name);
                 if let Some(variables) = &assignment.variables {
                     if let Some(value) = variables.get(key) {
-                        if assignment.assigned || assignment.overridden {
+                        if assignment.assigned || assignment.overridden || assignment.rule_override
+                        {
                             return Ok(value.clone());
                         }
                     }
@@ -678,7 +751,7 @@ impl Context {
                         return None;
                     }
                     let should_remove = match index.get(name) {
-                        None => assignment.assigned,
+                        None => assignment.assigned || assignment.rule_override,
                         Some(exp) => !Self::experiment_matches(&exp.data, assignment),
                     };
                     if should_remove {
@@ -798,15 +871,22 @@ impl Context {
                     return cached.clone();
                 }
             } else if !has_experiment {
-                if !cached.assigned {
+                // A rule-won assignment is not "assigned" either, but its
+                // variant came from the experiment's rules, so it is rebuilt
+                // once the experiment is gone.
+                if !cached.assigned && !cached.rule_override {
                     return cached.clone();
                 }
-            } else if !has_custom || self.cassignments[experiment_name] == cached.variant {
+            } else if cached.rule_override
+                || !has_custom
+                || self.cassignments[experiment_name] == cached.variant
+            {
+                let cached = cached.clone();
                 if let Some(exp) = self.index.get(experiment_name) {
-                    if Self::experiment_matches(&exp.data, cached)
-                        && self.audience_matches(&exp.data, cached)
-                    {
-                        return cached.clone();
+                    let fresh = Self::experiment_matches(&exp.data, &cached)
+                        && self.audience_matches(&exp.data, &cached);
+                    if fresh && self.rule_matches(experiment_name, &cached) {
+                        return self.assignments[experiment_name].clone();
                     }
                 }
             }
@@ -828,15 +908,27 @@ impl Context {
             assignment.overridden = true;
             assignment.variant = self.overrides[experiment_name];
         } else if let Some(ref exp_data) = exp_data_opt {
-            if !exp_data.audience.is_empty() {
-                let attrs = self.get_attributes();
+            // A matching rule is an explicit, author-specified assignment, like
+            // an override: it wins over the audience, traffic and custom
+            // assignments. The rules are recorded for every assignment so a
+            // refresh that changes them can be detected.
+            assignment.rule_key = exp_data.assignment_rules.clone();
+            assignment.rule_variant_count = exp_data.variants.len();
+            let rule = self.resolve_rule(experiment_name, false);
+
+            if rule.is_none() && !exp_data.audience.is_empty() {
+                let attrs = self.evaluation_attributes();
                 let result = self.audience_matcher.evaluate(&exp_data.audience, &attrs);
                 if let Some(matched) = result {
                     assignment.audience_mismatch = !matched;
                 }
             }
 
-            if exp_data.audience_strict && assignment.audience_mismatch {
+            if let Some((variant, missing_unit)) = rule {
+                assignment.rule_override = true;
+                assignment.rule_missing_unit = missing_unit;
+                assignment.variant = variant;
+            } else if exp_data.audience_strict && assignment.audience_mismatch {
                 assignment.variant = 0;
             } else if exp_data.full_on_variant == 0 {
                 if let Some(ref unit_type) = exp_data.unit_type {
@@ -897,9 +989,113 @@ impl Context {
             }
         }
 
+        // An already-exposed rule win with the same variant is kept, with only
+        // its rule bookkeeping refreshed: a new assignment would publish the
+        // same decision a second time.
+        if let Some(previous) = self.assignments.get_mut(experiment_name) {
+            let same_run = exp_data_opt
+                .as_ref()
+                .is_some_and(|exp| Self::experiment_matches(exp, previous));
+            if same_run
+                && previous.exposed
+                && previous.rule_override
+                && assignment.rule_override
+                && !previous.overridden
+                && previous.variant == assignment.variant
+            {
+                previous.rule_key = assignment.rule_key;
+                previous.rule_variant_count = assignment.rule_variant_count;
+                previous.rule_missing_unit = assignment.rule_missing_unit;
+                previous.attrs_seq = assignment.attrs_seq;
+                return previous.clone();
+            }
+        }
+
         self.assignments
             .insert(experiment_name.to_string(), assignment.clone());
         assignment
+    }
+
+    /// Resolve the experiment's assignment rules to `(variant, missing_unit)`,
+    /// or `None` when no rule applies. A fixed variant out of range, or a split
+    /// whose length differs from the variant count, is ignored. A split with
+    /// no unit to randomize over (or with `unit_pinned_missing`) gives the
+    /// full-on variant and is flagged `missing_unit`.
+    fn resolve_rule(
+        &mut self,
+        experiment_name: &str,
+        unit_pinned_missing: bool,
+    ) -> Option<(i32, bool)> {
+        let exp = self.index.get(experiment_name)?;
+        let rules = exp.rules.clone()?;
+        let variant_count = exp.data.variants.len();
+        let unit_type = exp.data.unit_type.clone();
+        let (full_on_variant, seed_hi, seed_lo) =
+            (exp.data.full_on_variant, exp.data.seed_hi, exp.data.seed_lo);
+
+        let attrs = self.evaluation_attributes();
+        let action =
+            self.audience_matcher
+                .evaluate_rules(&rules, self.system_environment(), &attrs)?;
+
+        match action {
+            RuleAction::Assign(variant) => {
+                let in_bounds = variant >= 0 && (variant as usize) < variant_count;
+                in_bounds.then_some((variant, false))
+            }
+            RuleAction::Split(split) => {
+                if split.len() != variant_count {
+                    return None;
+                }
+                let hash = match unit_type {
+                    Some(ref unit_type) if !unit_pinned_missing => self.unit_hash(unit_type),
+                    _ => None,
+                };
+                let (Some(unit_type), Some(hash)) = (unit_type, hash) else {
+                    return Some((full_on_variant as i32, true));
+                };
+                let assigner = self
+                    .assigners
+                    .entry(unit_type)
+                    .or_insert_with(|| VariantAssigner::new(&hash));
+                Some((assigner.assign(&split, seed_hi, seed_lo) as i32, false))
+            }
+        }
+    }
+
+    /// Whether the cached assignment's rule outcome is still current. Rules
+    /// are re-resolved only when they or the variant count changed (a
+    /// refresh) or an attribute was set since the assignment was built; when still current, the cached
+    /// entry records what it was checked against so this is not repeated.
+    fn rule_matches(&mut self, experiment_name: &str, assignment: &Assignment) -> bool {
+        let Some(exp) = self.index.get(experiment_name) else {
+            return true;
+        };
+        let rule_key = exp.data.assignment_rules.clone();
+        let variant_count = exp.data.variants.len();
+        if rule_key != assignment.rule_key
+            || variant_count != assignment.rule_variant_count
+            || self.attrs_seq > assignment.attrs_seq
+        {
+            // An exposed split resolved without its unit keeps resolving as if
+            // the unit were still missing, so a unit set afterwards cannot
+            // switch the variant the user already saw.
+            let pinned = assignment.rule_missing_unit && assignment.exposed;
+            let cached = assignment
+                .rule_override
+                .then_some((assignment.variant, assignment.rule_missing_unit));
+            if self.resolve_rule(experiment_name, pinned) != cached {
+                return false;
+            }
+        }
+
+        let attrs_seq = self.attrs_seq;
+        if let Some(entry) = self.assignments.get_mut(experiment_name) {
+            entry.rule_key = rule_key;
+            entry.rule_variant_count = variant_count;
+            entry.attrs_seq = attrs_seq;
+        }
+        true
     }
 
     fn experiment_matches(experiment: &ExperimentData, assignment: &Assignment) -> bool {
@@ -914,8 +1110,11 @@ impl Context {
     }
 
     fn audience_matches(&self, experiment: &ExperimentData, assignment: &Assignment) -> bool {
+        if assignment.rule_override {
+            return true;
+        }
         if !experiment.audience.is_empty() && self.attrs_seq > assignment.attrs_seq {
-            let attrs = self.get_attributes();
+            let attrs = self.evaluation_attributes();
             let result = self.audience_matcher.evaluate(&experiment.audience, &attrs);
             if let Some(matched) = result {
                 return matched != assignment.audience_mismatch;
@@ -938,6 +1137,7 @@ impl Context {
                 full_on: assignment.full_on,
                 custom: assignment.custom,
                 audience_mismatch: assignment.audience_mismatch,
+                rule_override: assignment.rule_override,
             };
 
             match serde_json::to_value(&exposure) {
@@ -1079,6 +1279,7 @@ mod tests {
                 .collect(),
             variables: HashMap::new(),
             custom_field_values: None,
+            assignment_rules: String::new(),
         }
     }
 
@@ -1600,6 +1801,7 @@ mod tests {
                 .collect(),
             variables: HashMap::new(),
             custom_field_values: None,
+            assignment_rules: String::new(),
         }
     }
 
@@ -3566,5 +3768,444 @@ mod tests {
 
         assert_eq!(ctx.refresh(), Err("Refresh fetch failed: boom".to_string()));
         assert_eq!(event_names(&log), vec!["error"]);
+    }
+
+    /// A strict audience experiment with a 0/100 split to variant 1, so a
+    /// matching audience yields variant 1 and a mismatch yields variant 0.
+    fn make_audience_experiment(audience: &str) -> ExperimentData {
+        let mut exp = make_experiment(
+            "test_exp",
+            vec!["{}", r#"{"button":"red"}"#],
+            vec![0.0, 1.0],
+        );
+        exp.audience = audience.to_string();
+        exp.audience_strict = true;
+        exp
+    }
+
+    fn context_with_system_attrs(
+        exp: ExperimentData,
+        application: Option<&str>,
+        environment: Option<&str>,
+    ) -> Context {
+        let mut context = Context::new(make_context_data(vec![exp]));
+        context.set_system_attributes(application, environment);
+        context.set_unit("session_id", "test_user").unwrap();
+        context
+    }
+
+    const PRODUCTION_FILTER: &str =
+        r#"{"filter":[{"eq":[{"var":"environment"},{"value":"production"}]}]}"#;
+
+    /// A strict-audience context for the "website" app in "production".
+    fn production_context(audience: &str) -> Context {
+        context_with_system_attrs(
+            make_audience_experiment(audience),
+            Some("website"),
+            Some("production"),
+        )
+    }
+
+    fn audience_mismatch(context: &Context, name: &str) -> bool {
+        context
+            .assignments
+            .get(name)
+            .map(|a| a.audience_mismatch)
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn test_system_attributes_in_strict_audience() {
+        for (audience, variant) in [
+            (PRODUCTION_FILTER, 1),
+            (
+                r#"{"filter":[{"eq":[{"var":"application"},{"value":"website"}]}]}"#,
+                1,
+            ),
+            (
+                r#"{"filter":[{"eq":[{"var":"environment"},{"value":"staging"}]}]}"#,
+                0,
+            ),
+            (
+                r#"{"filter":[{"eq":[{"var":"app_version"},{"value":"0"}]}]}"#,
+                0,
+            ),
+        ] {
+            let mut context = production_context(audience);
+            assert_eq!(
+                context.treatment("test_exp").unwrap(),
+                variant,
+                "{}",
+                audience
+            );
+            assert_eq!(audience_mismatch(&context, "test_exp"), variant == 0);
+        }
+    }
+
+    #[test]
+    fn test_user_attribute_overrides_system_environment() {
+        let staging_exp = make_audience_experiment(
+            r#"{"filter":[{"eq":[{"var":"environment"},{"value":"staging"}]}]}"#,
+        );
+        let mut context =
+            context_with_system_attrs(staging_exp, Some("website"), Some("production"));
+
+        assert_eq!(context.peek("test_exp").unwrap(), 0);
+
+        context.set_attribute("environment", "staging").unwrap();
+        assert_eq!(context.treatment("test_exp").unwrap(), 1);
+        assert!(!audience_mismatch(&context, "test_exp"));
+
+        let mut context2 = production_context(PRODUCTION_FILTER);
+        context2.set_attribute("environment", "staging").unwrap();
+        assert_eq!(context2.treatment("test_exp").unwrap(), 0);
+        assert!(audience_mismatch(&context2, "test_exp"));
+    }
+
+    #[test]
+    fn test_missing_environment_config_leaves_key_absent() {
+        let exp = make_audience_experiment(PRODUCTION_FILTER);
+        let mut context = context_with_system_attrs(exp, Some(""), None);
+
+        assert_eq!(context.treatment("test_exp").unwrap(), 0);
+        assert!(audience_mismatch(&context, "test_exp"));
+    }
+
+    #[test]
+    fn test_system_attributes_not_added_to_publish_payload() {
+        let mut context = production_context(PRODUCTION_FILTER);
+        context.treatment("test_exp").unwrap();
+
+        let params = context.get_publish_params();
+        let json = serde_json::to_value(&params).unwrap();
+        let attributes = json.get("attributes");
+        assert!(
+            attributes.is_none() || attributes == Some(&Value::Null),
+            "expected no attributes in publish payload, got: {:?}",
+            attributes
+        );
+    }
+
+    #[test]
+    fn test_user_attribute_still_published_but_system_not() {
+        let mut context = production_context(PRODUCTION_FILTER);
+        context.set_attribute("country", "US").unwrap();
+        context.treatment("test_exp").unwrap();
+
+        let params = context.get_publish_params();
+        let json = serde_json::to_value(&params).unwrap();
+        let attributes = json
+            .get("attributes")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let names: Vec<&str> = attributes
+            .iter()
+            .filter_map(|a| a.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"country"));
+        assert!(!names.contains(&"application"));
+        assert!(!names.contains(&"environment"));
+    }
+
+    #[test]
+    fn test_changing_system_attributes_invalidates_cached_assignment() {
+        let mut context = production_context(PRODUCTION_FILTER);
+
+        assert_eq!(context.peek("test_exp").unwrap(), 1);
+        assert!(!audience_mismatch(&context, "test_exp"));
+
+        context.set_system_attributes(Some("website"), Some("staging"));
+        assert_eq!(context.peek("test_exp").unwrap(), 0);
+        assert!(audience_mismatch(&context, "test_exp"));
+
+        context.set_system_attributes(Some("website"), Some("production"));
+        assert_eq!(context.peek("test_exp").unwrap(), 1);
+        assert!(!audience_mismatch(&context, "test_exp"));
+    }
+
+    #[test]
+    fn test_system_attributes_build_context_wires_config() {
+        let sdk = crate::sdk::Client::new(
+            "https://test.absmartly.io/v1",
+            "test-api-key",
+            "website",
+            "production",
+        )
+        .unwrap();
+        let exp = make_audience_experiment(PRODUCTION_FILTER);
+        let mut context = sdk.create_context_with(
+            [("session_id", "test_user")],
+            make_context_data(vec![exp]),
+            None,
+        );
+        assert_eq!(context.treatment("test_exp").unwrap(), 1);
+    }
+
+    fn rules_experiment(rules: Value) -> ExperimentData {
+        let mut exp = make_experiment(
+            "rules_exp",
+            vec![
+                r#"{"color":"red"}"#,
+                r#"{"color":"green"}"#,
+                r#"{"color":"blue"}"#,
+            ],
+            vec![1.0, 0.0, 0.0],
+        );
+        exp.assignment_rules = rules.to_string();
+        exp
+    }
+
+    fn rules_context(rules: Value) -> Context {
+        let mut ctx = Context::new(make_context_data(vec![rules_experiment(rules)]));
+        ctx.set_system_attributes(Some("website"), Some("production"));
+        ctx
+    }
+
+    fn exposures(ctx: &mut Context) -> Vec<Exposure> {
+        ctx.get_publish_params().exposures.unwrap_or_default()
+    }
+
+    #[test]
+    fn test_assign_rule_wins_and_flags_exposure() {
+        let mut ctx = rules_context(json!({"rules": [
+            {"type": "assign", "variant": 2, "conditions": {"eq": [{"var": "tier"}, {"value": "gold"}]}}
+        ]}));
+        ctx.set_unit("session_id", "user").unwrap();
+
+        assert_eq!(ctx.peek("rules_exp").unwrap(), 0);
+        ctx.set_attribute("tier", "gold").unwrap();
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 2);
+        assert_eq!(ctx.variable_value("color", "none").unwrap(), json!("blue"));
+
+        let exposures = exposures(&mut ctx);
+        assert_eq!(exposures.len(), 1);
+        assert!(exposures[0].rule_override);
+        assert!(!exposures[0].assigned);
+        assert!(!exposures[0].overridden);
+        let wire = serde_json::to_value(&exposures[0]).unwrap();
+        assert_eq!(wire["ruleOverride"], json!(true));
+    }
+
+    #[test]
+    fn test_assign_rule_without_unit_still_applies() {
+        let mut ctx = rules_context(json!({"rules": [{"type": "assign", "variant": 1}]}));
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 1);
+        assert_eq!(ctx.variable_value("color", "none").unwrap(), json!("green"));
+    }
+
+    #[test]
+    fn test_rule_beats_audience_strict_and_custom_assignment() {
+        let mut exp = rules_experiment(json!({"rules": [{"type": "assign", "variant": 1}]}));
+        exp.audience = r#"{"filter":[{"value":false}]}"#.to_string();
+        exp.audience_strict = true;
+        let mut ctx = Context::new(make_context_data(vec![exp]));
+        ctx.set_unit("session_id", "user").unwrap();
+        ctx.set_custom_assignment("rules_exp", 2).unwrap();
+
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 1);
+        let exposure = &exposures(&mut ctx)[0];
+        assert!(exposure.rule_override);
+        assert!(!exposure.audience_mismatch);
+        assert!(!exposure.custom);
+    }
+
+    #[test]
+    fn test_override_beats_rule() {
+        let mut ctx = rules_context(json!({"rules": [{"type": "assign", "variant": 1}]}));
+        ctx.set_unit("session_id", "user").unwrap();
+        ctx.set_override("rules_exp", 2).unwrap();
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 2);
+        let exposure = &exposures(&mut ctx)[0];
+        assert!(exposure.overridden);
+        assert!(!exposure.rule_override);
+    }
+
+    #[test]
+    fn test_out_of_range_or_mismatched_split_falls_back_without_trying_later_rules() {
+        for first in [
+            json!({"type": "assign", "variant": 3}),
+            json!({"type": "assign", "variant": -1}),
+            json!({"type": "split", "percentages": "50/50"}),
+        ] {
+            let mut ctx =
+                rules_context(json!({"rules": [first, {"type": "assign", "variant": 2}]}));
+            ctx.set_unit("session_id", "user").unwrap();
+            assert_eq!(ctx.treatment("rules_exp").unwrap(), 0);
+            assert!(!exposures(&mut ctx)[0].rule_override);
+        }
+    }
+
+    #[test]
+    fn test_rule_environments_use_client_environment() {
+        let rules =
+            json!({"rules": [{"type": "assign", "variant": 1, "environments": ["staging"]}]});
+        let mut ctx = rules_context(rules.clone());
+        ctx.set_unit("session_id", "user").unwrap();
+        assert_eq!(ctx.peek("rules_exp").unwrap(), 0);
+
+        let mut ctx = Context::new(make_context_data(vec![rules_experiment(rules)]));
+        ctx.set_system_attributes(Some("website"), Some("staging"));
+        ctx.set_unit("session_id", "user").unwrap();
+        assert_eq!(ctx.peek("rules_exp").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_rule_conditions_see_system_attributes_and_semver() {
+        let mut ctx = rules_context(json!({"rules": [{
+            "type": "assign",
+            "variant": 1,
+            "conditions": {"and": [
+                {"eq": [{"var": "application"}, {"value": "website"}]},
+                {"semver_gte": [{"var": "version"}, {"value": "2.0.0"}]}
+            ]}
+        }]}));
+        ctx.set_unit("session_id", "user").unwrap();
+        ctx.set_attribute("version", "1.9.9").unwrap();
+        assert_eq!(ctx.peek("rules_exp").unwrap(), 0);
+        ctx.set_attribute("version", "v2.0.0").unwrap();
+        assert_eq!(ctx.peek("rules_exp").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_split_rule_randomizes_over_its_percentages() {
+        let mut ctx =
+            rules_context(json!({"rules": [{"type": "split", "percentages": "0/50/50"}]}));
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..50 {
+            let mut c = Context::new(ctx.data().unwrap().clone());
+            c.set_unit("session_id", format!("user-{}", i)).unwrap();
+            let variant = c.treatment("rules_exp").unwrap();
+            assert_ne!(variant, 0);
+            seen.insert(variant);
+            assert!(exposures(&mut c)[0].rule_override);
+        }
+        assert_eq!(seen.len(), 2);
+
+        ctx.set_unit("session_id", "user-7").unwrap();
+        let hash = crate::utils::hash_unit("user-7");
+        let expected = VariantAssigner::new(&hash).assign(&[0.0, 0.5, 0.5], 0, 0) as i32;
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), expected);
+    }
+
+    #[test]
+    fn test_split_rule_without_unit_uses_full_on_and_rerandomizes_when_unexposed() {
+        let mut ctx =
+            rules_context(json!({"rules": [{"type": "split", "percentages": "0/0/100"}]}));
+        assert_eq!(ctx.peek("rules_exp").unwrap(), 0);
+        ctx.set_unit("session_id", "user").unwrap();
+        assert_eq!(ctx.peek("rules_exp").unwrap(), 2);
+    }
+
+    #[test]
+    fn test_exposed_split_rule_without_unit_stays_pinned() {
+        let mut ctx =
+            rules_context(json!({"rules": [{"type": "split", "percentages": "0/0/100"}]}));
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 0);
+        ctx.set_unit("session_id", "user").unwrap();
+        ctx.set_attribute("anything", 1).unwrap();
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 0);
+        let exposures = exposures(&mut ctx);
+        assert_eq!(exposures.len(), 1);
+        assert!(exposures[0].rule_override);
+    }
+
+    #[test]
+    fn test_attribute_change_reevaluates_rule() {
+        let mut ctx = rules_context(json!({"rules": [
+            {"type": "assign", "variant": 1, "conditions": {"eq": [{"var": "beta"}, {"value": true}]}}
+        ]}));
+        ctx.set_unit("session_id", "user").unwrap();
+        ctx.set_attribute("beta", true).unwrap();
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 1);
+        ctx.set_attribute("beta", false).unwrap();
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 0);
+        assert_eq!(exposures(&mut ctx).len(), 2);
+    }
+
+    #[test]
+    fn test_unrelated_attribute_change_keeps_exposed_rule_assignment() {
+        let mut ctx = rules_context(json!({"rules": [{"type": "assign", "variant": 1}]}));
+        ctx.set_unit("session_id", "user").unwrap();
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 1);
+        ctx.set_attribute("other", "x").unwrap();
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 1);
+        assert_eq!(exposures(&mut ctx).len(), 1);
+    }
+
+    #[test]
+    fn test_refresh_changing_rules_reassigns() {
+        let mut ctx = rules_context(json!({"rules": [{"type": "assign", "variant": 1}]}));
+        ctx.set_unit("session_id", "user").unwrap();
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 1);
+
+        let refreshed = rules_experiment(json!({"rules": [{"type": "assign", "variant": 2}]}));
+        ctx.refresh_with(make_context_data(vec![refreshed]));
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 2);
+
+        ctx.refresh_with(make_context_data(vec![rules_experiment(
+            json!({"rules": []}),
+        )]));
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 0);
+        let variants: Vec<i32> = exposures(&mut ctx).iter().map(|e| e.variant).collect();
+        assert_eq!(variants, vec![1, 2, 0]);
+    }
+
+    fn two_variant_rules_experiment(rules: Value) -> ExperimentData {
+        let mut exp = make_experiment(
+            "rules_exp",
+            vec![r#"{"color":"red"}"#, r#"{"color":"green"}"#],
+            vec![1.0, 0.0],
+        );
+        exp.assignment_rules = rules.to_string();
+        exp
+    }
+
+    #[test]
+    fn test_refresh_removing_variant_drops_out_of_range_assign_rule() {
+        let rules = json!({"rules": [{"type": "assign", "variant": 2}]});
+        let mut ctx = rules_context(rules.clone());
+        ctx.set_unit("session_id", "user").unwrap();
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 2);
+
+        ctx.refresh_with(make_context_data(vec![two_variant_rules_experiment(rules)]));
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 0);
+        let exposures = exposures(&mut ctx);
+        assert_eq!(exposures.len(), 2);
+        assert!(!exposures[1].rule_override);
+        assert!(exposures[1].assigned);
+    }
+
+    #[test]
+    fn test_refresh_removing_variant_drops_mismatched_split_rule() {
+        let rules = json!({"rules": [{"type": "split", "percentages": "0/0/100"}]});
+        let mut ctx = rules_context(rules.clone());
+        ctx.set_unit("session_id", "user").unwrap();
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 2);
+
+        ctx.refresh_with(make_context_data(vec![two_variant_rules_experiment(rules)]));
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 0);
+        let exposures = exposures(&mut ctx);
+        assert_eq!(exposures.len(), 2);
+        assert!(!exposures[1].rule_override);
+        assert!(exposures[1].assigned);
+    }
+
+    #[test]
+    fn test_refresh_removing_experiment_drops_rule_assignment() {
+        let mut ctx = rules_context(json!({"rules": [{"type": "assign", "variant": 1}]}));
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 1);
+        ctx.refresh_with(make_context_data(vec![]));
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_invalid_rules_json_is_ignored() {
+        let mut exp = rules_experiment(json!({}));
+        exp.assignment_rules = "{not json".to_string();
+        let mut ctx = Context::new(make_context_data(vec![exp]));
+        ctx.set_unit("session_id", "user").unwrap();
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 0);
+        assert!(!exposures(&mut ctx)[0].rule_override);
     }
 }

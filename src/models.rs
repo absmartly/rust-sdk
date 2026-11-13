@@ -9,6 +9,33 @@ where
     Ok(opt.unwrap_or_default())
 }
 
+/// `assignmentRules` arrives as a JSON string. An object or array in its
+/// place is ignored with a warning, so only that experiment's rules are
+/// skipped instead of failing the whole context; other scalars are kept in
+/// their string form.
+fn deserialize_assignment_rules<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        other => {
+            log::warn!(
+                "Ignoring assignmentRules: expected a JSON string but got {}",
+                if other.is_object() {
+                    "an object"
+                } else {
+                    "an array"
+                }
+            );
+            String::new()
+        }
+    })
+}
+
 /// The backend serializes seed fields as signed 32-bit integers (their raw
 /// two's-complement bit pattern), so values are frequently negative. Decode as
 /// i32 and reinterpret the bits as u32 rather than rejecting negative values.
@@ -68,6 +95,14 @@ pub struct ExperimentData {
     pub variables: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub custom_field_values: Option<Vec<CustomFieldValue>>,
+    /// The experiment's custom assignment rules, as the JSON string the API
+    /// sends (empty when there are none).
+    #[serde(
+        default,
+        deserialize_with = "deserialize_assignment_rules",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub assignment_rules: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -98,6 +133,16 @@ pub struct Assignment {
     pub full_on: bool,
     pub custom: bool,
     pub audience_mismatch: bool,
+    /// The variant was set by a matching assignment rule.
+    pub rule_override: bool,
+    /// A split rule matched but the unit was missing, so the full-on variant
+    /// was used; setting the unit later re-randomizes it while unexposed.
+    pub rule_missing_unit: bool,
+    /// The `assignmentRules` this assignment was resolved against.
+    pub rule_key: String,
+    /// The experiment's variant count when the rules were resolved; a change
+    /// can put a fixed variant out of range or invalidate a split.
+    pub rule_variant_count: usize,
     pub traffic_split: Option<Vec<f64>>,
     pub variables: Option<HashMap<String, serde_json::Value>>,
     pub attrs_seq: u64,
@@ -117,6 +162,10 @@ pub struct Exposure {
     pub full_on: bool,
     pub custom: bool,
     pub audience_mismatch: bool,
+    /// The variant was set by a matching assignment rule. Flagged so the
+    /// backend can exclude it from analysis, as it does for overrides.
+    #[serde(default)]
+    pub rule_override: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +265,29 @@ mod tests {
             r#"{"experiments":[{"id":1,"name":"t","seedHi":4294967296}]}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_assignment_rules_deserialization() {
+        let parse = |rules: &str| -> String {
+            let json = format!(
+                r#"{{"experiments":[{{"id":1,"name":"t","assignmentRules":{}}}]}}"#,
+                rules
+            );
+            serde_json::from_str::<ContextData>(&json)
+                .unwrap()
+                .experiments[0]
+                .assignment_rules
+                .clone()
+        };
+        assert_eq!(parse(r#""{\"rules\":[]}""#), r#"{"rules":[]}"#);
+        assert_eq!(parse("null"), "");
+        assert_eq!(parse(r#"{"rules":[]}"#), "");
+        assert_eq!(parse("[]"), "");
+        assert_eq!(parse("5"), "5");
+        let missing: ContextData =
+            serde_json::from_str(r#"{"experiments":[{"id":1,"name":"t"}]}"#).unwrap();
+        assert_eq!(missing.experiments[0].assignment_rules, "");
     }
 
     #[test]

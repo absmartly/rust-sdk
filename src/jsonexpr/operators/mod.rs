@@ -176,6 +176,39 @@ pub fn lte_op(evaluator: &Evaluator, args: &Value) -> Value {
     })
 }
 
+/// Compare two operands as semantic versions (see [`super::semver`]). Numbers
+/// and booleans are converted to strings first; null when either operand
+/// cannot be converted or has no version core.
+fn semver_compared(
+    evaluator: &Evaluator,
+    args: &Value,
+    test: impl FnOnce(std::cmp::Ordering) -> bool,
+) -> Value {
+    binary(evaluator, args, |lhs, rhs| {
+        let (Some(lhs), Some(rhs)) = (evaluator.string_convert(lhs), evaluator.string_convert(rhs))
+        else {
+            return Value::Null;
+        };
+        super::semver::compare(&lhs, &rhs).map_or(Value::Null, |o| Value::Bool(test(o)))
+    })
+}
+
+macro_rules! semver_op {
+    ($($name:ident => $test:ident),* $(,)?) => {$(
+        pub fn $name(evaluator: &Evaluator, args: &Value) -> Value {
+            semver_compared(evaluator, args, std::cmp::Ordering::$test)
+        }
+    )*};
+}
+
+semver_op! {
+    semver_eq_op => is_eq,
+    semver_gt_op => is_gt,
+    semver_gte_op => is_ge,
+    semver_lt_op => is_lt,
+    semver_lte_op => is_le,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,5 +850,54 @@ mod tests {
         let evaluator = make_evaluator();
         let result = match_op(&evaluator, &json!([{"value": "abc"}, {"value": "("}]));
         assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_semver_operators() {
+        let mut vars = HashMap::new();
+        vars.insert("app_version".to_string(), json!("2.4.1"));
+        let evaluator = Evaluator::new(vars);
+        let v = |op: fn(&Evaluator, &Value) -> Value, rhs: Value| {
+            op(&evaluator, &json!([{"var": "app_version"}, {"value": rhs}]))
+        };
+        assert_eq!(v(semver_eq_op, json!("v2.4.1+build")), json!(true));
+        assert_eq!(v(semver_eq_op, json!("2.4.0")), json!(false));
+        assert_eq!(v(semver_gt_op, json!("2.4.1-rc.1")), json!(true));
+        assert_eq!(v(semver_gt_op, json!("2.10.0")), json!(false));
+        assert_eq!(v(semver_gte_op, json!("2.4.1")), json!(true));
+        assert_eq!(v(semver_gte_op, json!("2.5")), json!(false));
+        assert_eq!(v(semver_lt_op, json!("10")), json!(true));
+        assert_eq!(v(semver_lt_op, json!(2)), json!(false));
+        assert_eq!(v(semver_lte_op, json!(2.5)), json!(true));
+        assert_eq!(v(semver_lte_op, json!("2.4")), json!(false));
+    }
+
+    #[test]
+    fn test_semver_operators_null_operands() {
+        let evaluator = make_evaluator();
+        assert_eq!(
+            semver_eq_op(&evaluator, &json!([{"value": null}, {"value": "1"}])),
+            Value::Null
+        );
+        assert_eq!(
+            semver_gt_op(&evaluator, &json!([{"value": "1"}, {"var": "missing"}])),
+            Value::Null
+        );
+        assert_eq!(
+            semver_lt_op(&evaluator, &json!([{"value": ""}, {"value": "1"}])),
+            Value::Null
+        );
+        assert_eq!(
+            semver_gte_op(&evaluator, &json!([{"value": [1]}, {"value": "1"}])),
+            Value::Null
+        );
+        assert_eq!(
+            semver_lte_op(&evaluator, &json!({"value": "1"})),
+            Value::Null
+        );
+        assert_eq!(
+            semver_eq_op(&evaluator, &json!([{"value": true}, {"value": "true"}])),
+            json!(true)
+        );
     }
 }
