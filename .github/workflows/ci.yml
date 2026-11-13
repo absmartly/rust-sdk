@@ -64,8 +64,13 @@ jobs:
   package:
     name: Package
     runs-on: ubuntu-latest
+    # The dry run builds dependencies and runs their build scripts.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
