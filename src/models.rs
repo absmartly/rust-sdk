@@ -140,6 +140,9 @@ pub struct Assignment {
     pub rule_missing_unit: bool,
     /// The `assignmentRules` this assignment was resolved against.
     pub rule_key: String,
+    /// The experiment's variant count when the rules were resolved; a change
+    /// can put a fixed variant out of range or invalidate a split.
+    pub rule_variant_count: usize,
     pub traffic_split: Option<Vec<f64>>,
     pub variables: Option<HashMap<String, serde_json::Value>>,
     pub attrs_seq: u64,

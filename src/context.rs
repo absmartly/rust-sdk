@@ -913,6 +913,7 @@ impl Context {
             // assignments. The rules are recorded for every assignment so a
             // refresh that changes them can be detected.
             assignment.rule_key = exp_data.assignment_rules.clone();
+            assignment.rule_variant_count = exp_data.variants.len();
             let rule = self.resolve_rule(experiment_name, false);
 
             if rule.is_none() && !exp_data.audience.is_empty() {
@@ -1003,6 +1004,7 @@ impl Context {
                 && previous.variant == assignment.variant
             {
                 previous.rule_key = assignment.rule_key;
+                previous.rule_variant_count = assignment.rule_variant_count;
                 previous.rule_missing_unit = assignment.rule_missing_unit;
                 previous.attrs_seq = assignment.attrs_seq;
                 return previous.clone();
@@ -1062,15 +1064,19 @@ impl Context {
     }
 
     /// Whether the cached assignment's rule outcome is still current. Rules
-    /// are re-resolved only when they changed (a refresh) or an attribute was
-    /// set since the assignment was built; when still current, the cached
+    /// are re-resolved only when they or the variant count changed (a
+    /// refresh) or an attribute was set since the assignment was built; when still current, the cached
     /// entry records what it was checked against so this is not repeated.
     fn rule_matches(&mut self, experiment_name: &str, assignment: &Assignment) -> bool {
         let Some(exp) = self.index.get(experiment_name) else {
             return true;
         };
         let rule_key = exp.data.assignment_rules.clone();
-        if rule_key != assignment.rule_key || self.attrs_seq > assignment.attrs_seq {
+        let variant_count = exp.data.variants.len();
+        if rule_key != assignment.rule_key
+            || variant_count != assignment.rule_variant_count
+            || self.attrs_seq > assignment.attrs_seq
+        {
             // An exposed split resolved without its unit keeps resolving as if
             // the unit were still missing, so a unit set afterwards cannot
             // switch the variant the user already saw.
@@ -1086,6 +1092,7 @@ impl Context {
         let attrs_seq = self.attrs_seq;
         if let Some(entry) = self.assignments.get_mut(experiment_name) {
             entry.rule_key = rule_key;
+            entry.rule_variant_count = variant_count;
             entry.attrs_seq = attrs_seq;
         }
         true
@@ -4142,6 +4149,46 @@ mod tests {
         assert_eq!(ctx.treatment("rules_exp").unwrap(), 0);
         let variants: Vec<i32> = exposures(&mut ctx).iter().map(|e| e.variant).collect();
         assert_eq!(variants, vec![1, 2, 0]);
+    }
+
+    fn two_variant_rules_experiment(rules: Value) -> ExperimentData {
+        let mut exp = make_experiment(
+            "rules_exp",
+            vec![r#"{"color":"red"}"#, r#"{"color":"green"}"#],
+            vec![1.0, 0.0],
+        );
+        exp.assignment_rules = rules.to_string();
+        exp
+    }
+
+    #[test]
+    fn test_refresh_removing_variant_drops_out_of_range_assign_rule() {
+        let rules = json!({"rules": [{"type": "assign", "variant": 2}]});
+        let mut ctx = rules_context(rules.clone());
+        ctx.set_unit("session_id", "user").unwrap();
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 2);
+
+        ctx.refresh_with(make_context_data(vec![two_variant_rules_experiment(rules)]));
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 0);
+        let exposures = exposures(&mut ctx);
+        assert_eq!(exposures.len(), 2);
+        assert!(!exposures[1].rule_override);
+        assert!(exposures[1].assigned);
+    }
+
+    #[test]
+    fn test_refresh_removing_variant_drops_mismatched_split_rule() {
+        let rules = json!({"rules": [{"type": "split", "percentages": "0/0/100"}]});
+        let mut ctx = rules_context(rules.clone());
+        ctx.set_unit("session_id", "user").unwrap();
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 2);
+
+        ctx.refresh_with(make_context_data(vec![two_variant_rules_experiment(rules)]));
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 0);
+        let exposures = exposures(&mut ctx);
+        assert_eq!(exposures.len(), 2);
+        assert!(!exposures[1].rule_override);
+        assert!(exposures[1].assigned);
     }
 
     #[test]
