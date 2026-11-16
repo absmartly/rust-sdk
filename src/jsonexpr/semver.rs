@@ -57,7 +57,8 @@ fn compare_identifiers(a: &str, b: &str) -> Ordering {
         }
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
-        (false, false) => a.cmp(b),
+        // JS compares strings by UTF-16 code unit, not by code point.
+        (false, false) => a.encode_utf16().cmp(b.encode_utf16()),
     }
 }
 
@@ -143,6 +144,16 @@ mod tests {
         assert_eq!(compare("1.x", "1.0"), Some(Greater));
         assert_eq!(compare("abc", "1"), Some(Greater));
         assert_eq!(compare("1..0", "1.0.0"), Some(Greater));
+    }
+
+    #[test]
+    fn test_alphanumeric_identifiers_order_by_utf16_like_js() {
+        // U+1F600 is a surrogate pair (0xD83D...) in UTF-16, so it sorts below
+        // U+E000 as JS strings do, although its UTF-8 and scalar value is higher.
+        assert_eq!(compare("1.0.0-\u{1F600}", "1.0.0-\u{E000}"), Some(Less));
+        assert_eq!(compare("1.0.0-\u{E000}", "1.0.0-\u{1F600}"), Some(Greater));
+        assert_eq!(compare("\u{1F600}", "\u{E000}"), Some(Less));
+        assert_eq!(compare("1.0.0-b", "1.0.0-a"), Some(Greater));
     }
 
     #[test]

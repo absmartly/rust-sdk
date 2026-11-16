@@ -18,6 +18,33 @@ struct Experiment {
     /// `data.assignment_rules` parsed once when the data is installed; `None`
     /// when there are none or they are not valid JSON.
     rules: Option<Arc<Vec<Value>>>,
+    /// Changes only when a data load changes the experiment's
+    /// `assignment_rules`, so cached assignments compare it instead of the
+    /// rule text.
+    rules_rev: u64,
+}
+
+/// What a cached assignment's rule outcome was resolved against. Kept beside
+/// the public [`Assignment`] rather than in it, so it stays an internal
+/// detail of the cache.
+#[derive(Debug, Clone, Copy, Default)]
+struct RuleState {
+    /// The variant was set by a matching assignment rule.
+    rule_override: bool,
+    /// A split rule matched but the unit was missing, so the full-on variant
+    /// was used; setting the unit later re-randomizes it while unexposed.
+    missing_unit: bool,
+    /// The experiment's `rules_rev` when the rules were resolved.
+    rules_rev: u64,
+    /// The experiment's variant count when the rules were resolved; a change
+    /// can put a fixed variant out of range or invalidate a split.
+    variant_count: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CachedAssignment {
+    assignment: Assignment,
+    rule: RuleState,
 }
 
 pub type DataFetcher = Box<dyn Fn() -> Result<ContextData, String> + Send + Sync>;
@@ -26,7 +53,7 @@ pub struct Context {
     units: HashMap<String, Value>,
     attrs: Vec<Attribute>,
     data: ContextData,
-    assignments: HashMap<String, Assignment>,
+    assignments: HashMap<String, CachedAssignment>,
     exposures: Vec<Exposure>,
     goals: Vec<Goal>,
     overrides: HashMap<String, i32>,
@@ -36,6 +63,7 @@ pub struct Context {
     failed_error: Option<String>,
     pending: usize,
     attrs_seq: u64,
+    rules_rev: u64,
     index: HashMap<String, Experiment>,
     index_variables: HashMap<String, Vec<String>>,
     assigners: HashMap<String, VariantAssigner>,
@@ -67,6 +95,7 @@ impl Context {
             failed_error: None,
             pending: 0,
             attrs_seq: 0,
+            rules_rev: 0,
             index: HashMap::new(),
             index_variables: HashMap::new(),
             assigners: HashMap::new(),
@@ -195,7 +224,7 @@ impl Context {
 
     fn init(&mut self, data: ContextData) {
         self.data = data;
-        self.index.clear();
+        let mut previous = std::mem::take(&mut self.index);
         self.index_variables.clear();
 
         for experiment in &self.data.experiments {
@@ -233,17 +262,27 @@ impl Context {
                 variables.push(parsed);
             }
 
-            let rules = match self
-                .audience_matcher
-                .parse_rules(&experiment.assignment_rules)
-            {
-                Ok(rules) => rules.map(Arc::new),
-                Err(e) => {
-                    warn!(
-                        "Invalid assignmentRules JSON for experiment '{}'; its rules are ignored: {}",
-                        experiment.name, e
-                    );
-                    None
+            let unchanged = previous
+                .remove(&experiment.name)
+                .filter(|old| old.data.assignment_rules == experiment.assignment_rules);
+            let (rules, rules_rev) = match unchanged {
+                Some(old) => (old.rules, old.rules_rev),
+                None => {
+                    let rules = match self
+                        .audience_matcher
+                        .parse_rules(&experiment.assignment_rules)
+                    {
+                        Ok(rules) => rules.map(Arc::new),
+                        Err(e) => {
+                            warn!(
+                                "Invalid assignmentRules JSON for experiment '{}'; its rules are ignored: {}",
+                                experiment.name, e
+                            );
+                            None
+                        }
+                    };
+                    self.rules_rev += 1;
+                    (rules, self.rules_rev)
                 }
             };
 
@@ -253,6 +292,7 @@ impl Context {
                     data: experiment.clone(),
                     variables,
                     rules,
+                    rules_rev,
                 },
             );
         }
@@ -333,7 +373,9 @@ impl Context {
         // with the unit now available it is re-randomized, but only while that
         // variant is still unseen.
         self.assignments.retain(|_, a| {
-            !(a.rule_missing_unit && !a.exposed && a.unit_type.as_deref() == Some(unit_type))
+            !(a.rule.missing_unit
+                && !a.assignment.exposed
+                && a.assignment.unit_type.as_deref() == Some(unit_type))
         });
         Ok(())
     }
@@ -467,7 +509,7 @@ impl Context {
     /// `Err` before the context is ready and once it is finalizing or finalized.
     pub fn peek(&mut self, experiment_name: &str) -> Result<i32, String> {
         self.check_ready(true)?;
-        Ok(self.assign(experiment_name).variant)
+        Ok(self.assign(experiment_name).assignment.variant)
     }
 
     /// The variant assigned to `experiment_name`; queues an exposure the first
@@ -475,12 +517,12 @@ impl Context {
     /// finalized.
     pub fn treatment(&mut self, experiment_name: &str) -> Result<i32, String> {
         self.check_ready(true)?;
-        let assignment = self.assign(experiment_name);
-        let variant = assignment.variant;
+        let assignment = &self.assign(experiment_name).assignment;
+        let (variant, exposed) = (assignment.variant, assignment.exposed);
 
-        if !assignment.exposed {
-            if let Some(assignment) = self.assignments.get_mut(experiment_name) {
-                assignment.exposed = true;
+        if !exposed {
+            if let Some(entry) = self.assignments.get_mut(experiment_name) {
+                entry.assignment.exposed = true;
             }
             self.queue_exposure(experiment_name);
         }
@@ -531,20 +573,22 @@ impl Context {
         self.check_ready(true)?;
         if let Some(experiment_names) = self.index_variables.get(key).cloned() {
             for exp_name in experiment_names {
-                let assignment = self.assign(&exp_name);
-                if let Some(variables) = &assignment.variables {
-                    if !assignment.exposed {
-                        if let Some(a) = self.assignments.get_mut(&exp_name) {
-                            a.exposed = true;
+                let cached = self.assign(&exp_name);
+                if let Some(variables) = &cached.assignment.variables {
+                    let a = &cached.assignment;
+                    let value = variables
+                        .get(key)
+                        .filter(|_| a.assigned || a.overridden || cached.rule.rule_override)
+                        .cloned();
+                    if !a.exposed {
+                        if let Some(entry) = self.assignments.get_mut(&exp_name) {
+                            entry.assignment.exposed = true;
                         }
                         self.queue_exposure(&exp_name);
                     }
 
-                    if let Some(value) = variables.get(key) {
-                        if assignment.assigned || assignment.overridden || assignment.rule_override
-                        {
-                            return Ok(value.clone());
-                        }
+                    if let Some(value) = value {
+                        return Ok(value);
                     }
                 }
             }
@@ -560,11 +604,11 @@ impl Context {
         self.check_ready(true)?;
         if let Some(experiment_names) = self.index_variables.get(key).cloned() {
             for exp_name in experiment_names {
-                let assignment = self.assign(&exp_name);
-                if let Some(variables) = &assignment.variables {
+                let cached = self.assign(&exp_name);
+                let a = &cached.assignment;
+                if let Some(variables) = &a.variables {
                     if let Some(value) = variables.get(key) {
-                        if assignment.assigned || assignment.overridden || assignment.rule_override
-                        {
+                        if a.assigned || a.overridden || cached.rule.rule_override {
                             return Ok(value.clone());
                         }
                     }
@@ -746,12 +790,13 @@ impl Context {
             let index = &self.index;
             assignments
                 .iter()
-                .filter_map(|(name, assignment)| {
+                .filter_map(|(name, cached)| {
+                    let assignment = &cached.assignment;
                     if assignment.overridden {
                         return None;
                     }
                     let should_remove = match index.get(name) {
-                        None => assignment.assigned || assignment.rule_override,
+                        None => assignment.assigned || cached.rule.rule_override,
                         Some(exp) => !Self::experiment_matches(&exp.data, assignment),
                     };
                     if should_remove {
@@ -860,33 +905,54 @@ impl Context {
         self.finalize()
     }
 
-    fn assign(&mut self, experiment_name: &str) -> Assignment {
+    /// Make the cached assignment for `experiment_name` current, rebuilding
+    /// it when stale. Afterwards `self.assignments` always has the entry;
+    /// callers read it there, so a cache hit copies nothing.
+    fn assign(&mut self, experiment_name: &str) -> &CachedAssignment {
+        self.refresh_assignment(experiment_name);
+        &self.assignments[experiment_name]
+    }
+
+    fn refresh_assignment(&mut self, experiment_name: &str) {
         let has_custom = self.cassignments.contains_key(experiment_name);
         let has_override = self.overrides.contains_key(experiment_name);
         let has_experiment = self.index.contains_key(experiment_name);
 
         if let Some(cached) = self.assignments.get(experiment_name) {
+            let a = &cached.assignment;
             if has_override {
-                if cached.overridden && cached.variant == self.overrides[experiment_name] {
-                    return cached.clone();
+                if a.overridden && a.variant == self.overrides[experiment_name] {
+                    return;
                 }
             } else if !has_experiment {
                 // A rule-won assignment is not "assigned" either, but its
                 // variant came from the experiment's rules, so it is rebuilt
                 // once the experiment is gone.
-                if !cached.assigned && !cached.rule_override {
-                    return cached.clone();
+                if !a.assigned && !cached.rule.rule_override {
+                    return;
                 }
-            } else if cached.rule_override
+            } else if cached.rule.rule_override
                 || !has_custom
-                || self.cassignments[experiment_name] == cached.variant
+                || self.cassignments[experiment_name] == a.variant
             {
-                let cached = cached.clone();
-                if let Some(exp) = self.index.get(experiment_name) {
-                    let fresh = Self::experiment_matches(&exp.data, &cached)
-                        && self.audience_matches(&exp.data, &cached);
-                    if fresh && self.rule_matches(experiment_name, &cached) {
-                        return self.assignments[experiment_name].clone();
+                let exp = &self.index[experiment_name];
+                if Self::experiment_matches(&exp.data, a)
+                    && self.audience_matches(&exp.data, cached)
+                {
+                    let (rules_rev, variant_count) = (exp.rules_rev, exp.data.variants.len());
+                    if cached.rule.rules_rev == rules_rev
+                        && cached.rule.variant_count == variant_count
+                        && self.attrs_seq <= a.attrs_seq
+                    {
+                        return;
+                    }
+                    if self.rule_still_resolves(experiment_name) {
+                        let attrs_seq = self.attrs_seq;
+                        let entry = self.assignments.get_mut(experiment_name).unwrap();
+                        entry.rule.rules_rev = rules_rev;
+                        entry.rule.variant_count = variant_count;
+                        entry.assignment.attrs_seq = attrs_seq;
+                        return;
                     }
                 }
             }
@@ -898,6 +964,7 @@ impl Context {
             eligible: true,
             ..Default::default()
         };
+        let mut rule_state = RuleState::default();
 
         if has_override {
             if let Some(ref exp_data) = exp_data_opt {
@@ -912,8 +979,8 @@ impl Context {
             // an override: it wins over the audience, traffic and custom
             // assignments. The rules are recorded for every assignment so a
             // refresh that changes them can be detected.
-            assignment.rule_key = exp_data.assignment_rules.clone();
-            assignment.rule_variant_count = exp_data.variants.len();
+            rule_state.rules_rev = self.index[experiment_name].rules_rev;
+            rule_state.variant_count = exp_data.variants.len();
             let rule = self.resolve_rule(experiment_name, false);
 
             if rule.is_none() && !exp_data.audience.is_empty() {
@@ -925,8 +992,8 @@ impl Context {
             }
 
             if let Some((variant, missing_unit)) = rule {
-                assignment.rule_override = true;
-                assignment.rule_missing_unit = missing_unit;
+                rule_state.rule_override = true;
+                rule_state.missing_unit = missing_unit;
                 assignment.variant = variant;
             } else if exp_data.audience_strict && assignment.audience_mismatch {
                 assignment.variant = 0;
@@ -995,25 +1062,27 @@ impl Context {
         if let Some(previous) = self.assignments.get_mut(experiment_name) {
             let same_run = exp_data_opt
                 .as_ref()
-                .is_some_and(|exp| Self::experiment_matches(exp, previous));
+                .is_some_and(|exp| Self::experiment_matches(exp, &previous.assignment));
             if same_run
-                && previous.exposed
-                && previous.rule_override
-                && assignment.rule_override
-                && !previous.overridden
-                && previous.variant == assignment.variant
+                && previous.assignment.exposed
+                && previous.rule.rule_override
+                && rule_state.rule_override
+                && !previous.assignment.overridden
+                && previous.assignment.variant == assignment.variant
             {
-                previous.rule_key = assignment.rule_key;
-                previous.rule_variant_count = assignment.rule_variant_count;
-                previous.rule_missing_unit = assignment.rule_missing_unit;
-                previous.attrs_seq = assignment.attrs_seq;
-                return previous.clone();
+                previous.rule = rule_state;
+                previous.assignment.attrs_seq = assignment.attrs_seq;
+                return;
             }
         }
 
-        self.assignments
-            .insert(experiment_name.to_string(), assignment.clone());
-        assignment
+        self.assignments.insert(
+            experiment_name.to_string(),
+            CachedAssignment {
+                assignment,
+                rule: rule_state,
+            },
+        );
     }
 
     /// Resolve the experiment's assignment rules to `(variant, missing_unit)`,
@@ -1040,8 +1109,8 @@ impl Context {
 
         match action {
             RuleAction::Assign(variant) => {
-                let in_bounds = variant >= 0 && (variant as usize) < variant_count;
-                in_bounds.then_some((variant, false))
+                let in_bounds = usize::try_from(variant).is_ok_and(|v| v < variant_count);
+                in_bounds.then_some((variant as i32, false))
             }
             RuleAction::Split(split) => {
                 if split.len() != variant_count {
@@ -1063,39 +1132,20 @@ impl Context {
         }
     }
 
-    /// Whether the cached assignment's rule outcome is still current. Rules
-    /// are re-resolved only when they or the variant count changed (a
-    /// refresh) or an attribute was set since the assignment was built; when still current, the cached
-    /// entry records what it was checked against so this is not repeated.
-    fn rule_matches(&mut self, experiment_name: &str, assignment: &Assignment) -> bool {
-        let Some(exp) = self.index.get(experiment_name) else {
-            return true;
-        };
-        let rule_key = exp.data.assignment_rules.clone();
-        let variant_count = exp.data.variants.len();
-        if rule_key != assignment.rule_key
-            || variant_count != assignment.rule_variant_count
-            || self.attrs_seq > assignment.attrs_seq
-        {
-            // An exposed split resolved without its unit keeps resolving as if
-            // the unit were still missing, so a unit set afterwards cannot
-            // switch the variant the user already saw.
-            let pinned = assignment.rule_missing_unit && assignment.exposed;
-            let cached = assignment
-                .rule_override
-                .then_some((assignment.variant, assignment.rule_missing_unit));
-            if self.resolve_rule(experiment_name, pinned) != cached {
-                return false;
-            }
-        }
-
-        let attrs_seq = self.attrs_seq;
-        if let Some(entry) = self.assignments.get_mut(experiment_name) {
-            entry.rule_key = rule_key;
-            entry.rule_variant_count = variant_count;
-            entry.attrs_seq = attrs_seq;
-        }
-        true
+    /// Whether re-resolving the experiment's rules still gives the cached
+    /// assignment's rule outcome. Called only when the rules, the variant
+    /// count or the attributes changed since the assignment was built.
+    fn rule_still_resolves(&mut self, experiment_name: &str) -> bool {
+        let cached = &self.assignments[experiment_name];
+        // An exposed split resolved without its unit keeps resolving as if
+        // the unit were still missing, so a unit set afterwards cannot
+        // switch the variant the user already saw.
+        let pinned = cached.rule.missing_unit && cached.assignment.exposed;
+        let expected = cached
+            .rule
+            .rule_override
+            .then_some((cached.assignment.variant, cached.rule.missing_unit));
+        self.resolve_rule(experiment_name, pinned) == expected
     }
 
     fn experiment_matches(experiment: &ExperimentData, assignment: &Assignment) -> bool {
@@ -1109,10 +1159,11 @@ impl Context {
                 .is_some_and(|ts| array_equals_shallow(&experiment.traffic_split, ts))
     }
 
-    fn audience_matches(&self, experiment: &ExperimentData, assignment: &Assignment) -> bool {
-        if assignment.rule_override {
+    fn audience_matches(&self, experiment: &ExperimentData, cached: &CachedAssignment) -> bool {
+        if cached.rule.rule_override {
             return true;
         }
+        let assignment = &cached.assignment;
         if !experiment.audience.is_empty() && self.attrs_seq > assignment.attrs_seq {
             let attrs = self.evaluation_attributes();
             let result = self.audience_matcher.evaluate(&experiment.audience, &attrs);
@@ -1124,7 +1175,8 @@ impl Context {
     }
 
     fn queue_exposure(&mut self, experiment_name: &str) {
-        if let Some(assignment) = self.assignments.get(experiment_name) {
+        if let Some(cached) = self.assignments.get(experiment_name) {
+            let assignment = &cached.assignment;
             let exposure = Exposure {
                 id: assignment.id,
                 name: experiment_name.to_string(),
@@ -1137,7 +1189,7 @@ impl Context {
                 full_on: assignment.full_on,
                 custom: assignment.custom,
                 audience_mismatch: assignment.audience_mismatch,
-                rule_override: assignment.rule_override,
+                rule_override: cached.rule.rule_override,
             };
 
             match serde_json::to_value(&exposure) {
@@ -3810,7 +3862,7 @@ mod tests {
         context
             .assignments
             .get(name)
-            .map(|a| a.audience_mismatch)
+            .map(|a| a.assignment.audience_mismatch)
             .unwrap_or(false)
     }
 
@@ -3830,6 +3882,9 @@ mod tests {
                 r#"{"filter":[{"eq":[{"var":"app_version"},{"value":"0"}]}]}"#,
                 0,
             ),
+            // No app_version of any value is injected.
+            (r#"{"filter":[{"null":{"var":"app_version"}}]}"#, 1),
+            (r#"{"filter":[{"null":{"var":"environment"}}]}"#, 0),
         ] {
             let mut context = production_context(audience);
             assert_eq!(
@@ -3869,6 +3924,19 @@ mod tests {
 
         assert_eq!(context.treatment("test_exp").unwrap(), 0);
         assert!(audience_mismatch(&context, "test_exp"));
+
+        // Empty or missing names leave the key absent (null), not "".
+        for (application, environment) in [(Some(""), Some("")), (None, None)] {
+            for name in ["application", "environment", "app_version"] {
+                let audience = format!(r#"{{"filter":[{{"null":{{"var":"{}"}}}}]}}"#, name);
+                let mut context = context_with_system_attrs(
+                    make_audience_experiment(&audience),
+                    application,
+                    environment,
+                );
+                assert_eq!(context.treatment("test_exp").unwrap(), 1, "{}", name);
+            }
+        }
     }
 
     #[test]
@@ -4026,6 +4094,11 @@ mod tests {
         for first in [
             json!({"type": "assign", "variant": 3}),
             json!({"type": "assign", "variant": -1}),
+            // Integral but beyond i32: still the first match, as in JS, which
+            // then fails the bounds check instead of moving on.
+            json!({"type": "assign", "variant": 2147483648_i64}),
+            json!({"type": "assign", "variant": -2147483649_i64}),
+            json!({"type": "assign", "variant": 1e300}),
             json!({"type": "split", "percentages": "50/50"}),
         ] {
             let mut ctx =
@@ -4086,6 +4159,27 @@ mod tests {
         let hash = crate::utils::hash_unit("user-7");
         let expected = VariantAssigner::new(&hash).assign(&[0.0, 0.5, 0.5], 0, 0) as i32;
         assert_eq!(ctx.treatment("rules_exp").unwrap(), expected);
+    }
+
+    #[test]
+    fn test_split_rule_matches_javascript_per_uid_with_experiment_seeds() {
+        // From javascript-sdk's VariantAssigner for a 20/30/50 split: seeds
+        // 123/456 give these; the traffic seeds 789/1011 would give
+        // [2, 1, 2, 1, 2, 2] and 0/0 [2, 2, 2, 2, 1, 2].
+        let mut exp =
+            rules_experiment(json!({"rules": [{"type": "split", "percentages": "20/30/50"}]}));
+        (exp.seed_hi, exp.seed_lo) = (123, 456);
+        (exp.traffic_seed_hi, exp.traffic_seed_lo) = (789, 1011);
+        let data = make_context_data(vec![exp]);
+        let variants: Vec<i32> = ["alice", "bob", "charlie", "dave", "eve", "user-7"]
+            .into_iter()
+            .map(|uid| {
+                let mut ctx = Context::new(data.clone());
+                ctx.set_unit("session_id", uid).unwrap();
+                ctx.treatment("rules_exp").unwrap()
+            })
+            .collect();
+        assert_eq!(variants, [1, 2, 1, 1, 2, 2]);
     }
 
     #[test]

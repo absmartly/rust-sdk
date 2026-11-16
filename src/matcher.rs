@@ -11,8 +11,10 @@ const SPLIT_PERCENTAGES_SUM_TOLERANCE: f64 = 0.01;
 /// The action of the first matching assignment rule.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuleAction {
-    /// An `assign` rule: a fixed variant.
-    Assign(i32),
+    /// An `assign` rule: a fixed variant. Any integral number is kept (beyond
+    /// `i64` it saturates) so an out-of-range one still ends the search and is
+    /// rejected by the caller's bounds check, as in JS.
+    Assign(i64),
     /// A `split` rule: fractions (one per variant, summing to 1) to randomize
     /// the unit over.
     Split(Vec<f64>),
@@ -95,14 +97,13 @@ pub(crate) fn parse_split_percentages(percentages: &Value) -> Option<Vec<f64>> {
     Some(values.iter().map(|v| v / 100.0).collect())
 }
 
-/// An integral number (including `2.0`) within `i32` range, like JavaScript's
-/// `Number.isInteger`.
-fn as_variant(value: &Value) -> Option<i32> {
-    let d = value.as_f64()?;
-    if d.fract() != 0.0 || d < f64::from(i32::MIN) || d > f64::from(i32::MAX) {
-        return None;
+/// An integral number (including `2.0`), like JavaScript's `Number.isInteger`.
+fn as_variant(value: &Value) -> Option<i64> {
+    if let Some(i) = value.as_i64() {
+        return Some(i);
     }
-    Some(d as i32)
+    let d = value.as_f64()?;
+    (d.is_finite() && d.fract() == 0.0).then_some(d as i64)
 }
 
 pub struct AudienceMatcher {
