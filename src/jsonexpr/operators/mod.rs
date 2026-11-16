@@ -886,7 +886,6 @@ mod tests {
 
     #[test]
     fn test_semver_numeric_operands_convert_like_javascript() {
-        // Each pair is semver_eq in javascript-sdk.
         let evaluator = make_evaluator();
         for (lhs, rhs) in [
             (json!(1e-7), "0.0000001"),

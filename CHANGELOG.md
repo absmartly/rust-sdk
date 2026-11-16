@@ -26,9 +26,10 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
 - Audiences and rule conditions always see the client's `application` and
   `environment`. Only non-empty values are used, and a user attribute with
   the same name overrides them. They are not added to the publish payload,
-  and no `app_version` is injected. **This changes assignment** for
+  and no `app_version` is injected. **This can change assignment** for
   strict-audience experiments that filter on `application` or `environment`:
-  they previously always fell back to variant 0.
+  before 0.2.0 they fell back to variant 0 unless a user attribute of the
+  same name matched the audience.
 - The `X-Agent` header is now `absmartly-rust-sdk/<version>`. A configured
   `agent` is still sent as `User-Agent`.
 - **BREAKING (source):** `ExperimentData` gained `assignment_rules: String` and

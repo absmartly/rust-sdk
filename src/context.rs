@@ -3882,7 +3882,6 @@ mod tests {
                 r#"{"filter":[{"eq":[{"var":"app_version"},{"value":"0"}]}]}"#,
                 0,
             ),
-            // No app_version of any value is injected.
             (r#"{"filter":[{"null":{"var":"app_version"}}]}"#, 1),
             (r#"{"filter":[{"null":{"var":"environment"}}]}"#, 0),
         ] {
@@ -3925,7 +3924,6 @@ mod tests {
         assert_eq!(context.treatment("test_exp").unwrap(), 0);
         assert!(audience_mismatch(&context, "test_exp"));
 
-        // Empty or missing names leave the key absent (null), not "".
         for (application, environment) in [(Some(""), Some("")), (None, None)] {
             for name in ["application", "environment", "app_version"] {
                 let audience = format!(r#"{{"filter":[{{"null":{{"var":"{}"}}}}]}}"#, name);
@@ -4171,7 +4169,6 @@ mod tests {
         let current = ctx.index["rules_exp"].rules_rev;
         assert_eq!(ctx.assignments["rules_exp"].rule.rules_rev, current);
 
-        // Unchanged rules keep their revision across a refresh.
         let data = ctx.data().unwrap().clone();
         ctx.refresh_with(data);
         assert_eq!(ctx.index["rules_exp"].rules_rev, current);
