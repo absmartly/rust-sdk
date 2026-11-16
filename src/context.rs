@@ -4110,6 +4110,126 @@ mod tests {
     }
 
     #[test]
+    fn test_rule_scope_ignores_user_environment_attribute() {
+        // Scope uses the configured environment; a condition still sees the
+        // user's value.
+        let mut ctx = rules_context(
+            json!({"rules": [{"type": "assign", "variant": 1, "environments": ["staging"]}]}),
+        );
+        ctx.set_unit("session_id", "user").unwrap();
+        ctx.set_attribute("environment", "staging").unwrap();
+        assert_eq!(ctx.peek("rules_exp").unwrap(), 0);
+
+        let mut ctx = rules_context(json!({"rules": [{"type": "assign", "variant": 1,
+            "conditions": {"eq": [{"var": "environment"}, {"value": "staging"}]}}]}));
+        ctx.set_unit("session_id", "user").unwrap();
+        ctx.set_attribute("environment", "staging").unwrap();
+        assert_eq!(ctx.peek("rules_exp").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_rule_wins_over_zero_traffic() {
+        let mut exp = rules_experiment(json!({"rules": [{"type": "assign", "variant": 2}]}));
+        exp.traffic_split = vec![1.0, 0.0];
+        let mut ctx = Context::new(make_context_data(vec![exp]));
+        ctx.set_unit("session_id", "user").unwrap();
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 2);
+        assert!(exposures(&mut ctx)[0].rule_override);
+    }
+
+    #[test]
+    fn test_exposed_rule_win_rebuilt_to_same_variant_is_not_exposed_again() {
+        // The exposed split resolved without its unit (full-on variant 0); the
+        // refreshed rule assigns 0 directly. The outcome changed but the
+        // variant did not, so the decision must not be published again.
+        let mut ctx =
+            rules_context(json!({"rules": [{"type": "split", "percentages": "0/0/100"}]}));
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 0);
+
+        let mut data = ctx.data().unwrap().clone();
+        data.experiments[0].assignment_rules =
+            json!({"rules": [{"type": "assign", "variant": 0}]}).to_string();
+        ctx.refresh_with(data);
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 0);
+        assert_eq!(ctx.variable_value("color", "none").unwrap(), json!("red"));
+        let exposures = exposures(&mut ctx);
+        assert_eq!(exposures.len(), 1);
+        assert!(exposures[0].rule_override);
+    }
+
+    #[test]
+    fn test_same_outcome_refresh_advances_the_rules_revision() {
+        let mut ctx = rules_context(json!({"rules": [{"type": "assign", "variant": 2}]}));
+        ctx.set_unit("session_id", "user").unwrap();
+        ctx.treatment("rules_exp").unwrap();
+
+        let mut data = ctx.data().unwrap().clone();
+        data.experiments[0].assignment_rules =
+            json!({"rules": [{"name": "renamed", "type": "assign", "variant": 2}]}).to_string();
+        ctx.refresh_with(data);
+        assert_eq!(ctx.peek("rules_exp").unwrap(), 2);
+        let current = ctx.index["rules_exp"].rules_rev;
+        assert_eq!(ctx.assignments["rules_exp"].rule.rules_rev, current);
+
+        // Unchanged rules keep their revision across a refresh.
+        let data = ctx.data().unwrap().clone();
+        ctx.refresh_with(data);
+        assert_eq!(ctx.index["rules_exp"].rules_rev, current);
+    }
+
+    #[test]
+    fn test_user_app_version_is_evaluated_and_published() {
+        let mut ctx = rules_context(json!({"rules": [{"type": "assign", "variant": 1,
+            "conditions": {"semver_gte": [{"var": "app_version"}, {"value": "2.0.0"}]}}]}));
+        ctx.set_unit("session_id", "user").unwrap();
+        ctx.set_attribute("app_version", "2.1.0").unwrap();
+        assert_eq!(ctx.treatment("rules_exp").unwrap(), 1);
+        let attributes = ctx.get_publish_params().attributes.unwrap_or_default();
+        let names: Vec<&str> = attributes.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["app_version"]);
+    }
+
+    #[test]
+    fn test_every_exposure_serializes_rule_override() {
+        let mut ctx = Context::new(make_context_data(vec![make_experiment(
+            "plain",
+            vec!["", ""],
+            vec![0.5, 0.5],
+        )]));
+        ctx.set_unit("session_id", "user").unwrap();
+        ctx.treatment("plain").unwrap();
+        let wire = serde_json::to_value(&exposures(&mut ctx)[0]).unwrap();
+        assert_eq!(wire["ruleOverride"], json!(false));
+    }
+
+    #[test]
+    fn test_unknown_payload_fields_are_ignored_at_every_level() {
+        let data: ContextData = serde_json::from_value(json!({
+            "experiments": [
+                {
+                    "id": 1, "name": "a", "unitType": "session_id", "iteration": 1,
+                    "split": [0.0, 1.0], "trafficSplit": [0.0, 1.0],
+                    "variants": [{"config": null, "future": [1]}, {"config": "{}", "x": {"y": 1}}],
+                    "customFieldValues": [{"name": "f", "value": "v", "type": "string", "extra": true}],
+                    "assignmentRules": "{\"rules\":[{\"type\":\"future\"}],\"version\":2}",
+                    "holdouts": [{"id": 9}], "switchback": {"period": 60}, "newScalar": 1
+                },
+                {
+                    "id": 2, "name": "b", "unitType": "session_id", "iteration": 1,
+                    "split": [0.0, 1.0], "trafficSplit": [0.0, 1.0],
+                    "variants": [{}, {}], "assignmentRules": {"rules": []}, "tags": ["t"]
+                }
+            ],
+            "application": {"name": "x"}, "futureRoot": [1, {"a": null}], "flag": true
+        }))
+        .unwrap();
+        let mut ctx = Context::new(data);
+        ctx.set_unit("session_id", "user").unwrap();
+        assert_eq!(ctx.treatment("a").unwrap(), 1);
+        assert_eq!(ctx.treatment("b").unwrap(), 1);
+    }
+
+    #[test]
     fn test_rule_environments_use_client_environment() {
         let rules =
             json!({"rules": [{"type": "assign", "variant": 1, "environments": ["staging"]}]});
