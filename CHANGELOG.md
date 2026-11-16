@@ -23,6 +23,8 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
 
 ### Changed
 
+Breaking changes are listed against the released 0.1.0.
+
 - Audiences and rule conditions always see the client's `application` and
   `environment`. Only non-empty values are used, and a user attribute with
   the same name overrides them. They are not added to the publish payload,
@@ -37,13 +39,30 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   deserializes (they default to `""` and `false`), but exhaustive struct
   literals must set them, for example by adding `assignment_rules: String::new()`
   and `rule_override: false`. `Assignment` is unchanged.
-- **BREAKING:** the crate is imported as `absmartly`, and the client types
-  were renamed. `ABsmartly` became `Client`, `ABsmartlyBuilder` became
-  `ClientBuilder`, `SDKConfig` became `Config` and `SDKError` became `Error`,
-  and `SDK` is replaced by `Client::from_config`. `ContextOptions` gained
-  `event_logger`. `Context::refresh()` now fetches. Unit values are
-  `serde_json::Value`. The `in` operator takes the list first. `Error` gained
-  `HttpStatus(u16)`. See the README's Compatibility section.
+- **BREAKING:** the crate is imported as `absmartly` instead of
+  `absmartly_sdk` (the package is still `absmartly-sdk`).
+- **BREAKING:** `SDK` and `SDKOptions` were removed, with `SDK::new` and
+  `SDK::create_context_with`. Build a `Client` with `Client::builder()`,
+  `Client::new(endpoint, api_key, application, environment)` or
+  `Client::from_config(Config)`, and create contexts with
+  `Client::create_context_with` or the async `Client::create_context`.
+  Client errors are `absmartly::Error`, which includes `HttpStatus(u16)`.
+- **BREAKING:** `Context` methods that used to return a bare value now return
+  `Result<_, String>`, so they can report a context that is not ready or is
+  finalized: `peek`, `treatment`, `variable_value`, `peek_variable_value`,
+  `variable_keys`, `custom_field_value`, `custom_field_value_type`,
+  `custom_field_keys`, `experiments`, `data`, `publish`, `finalize` and
+  `set_override`.
+- **BREAKING:** unit values are `serde_json::Value`: `set_unit` takes
+  `impl Into<Value>`, `get_unit` returns `Option<&Value>` and `get_units`
+  returns `&HashMap<String, Value>`.
+- **BREAKING:** `Context::refresh()` takes no argument and fetches. Use
+  `refresh_with(data)` to apply data you already have. Unlike 0.1.0, a
+  refresh keeps the assignments that are still valid.
+- **BREAKING:** `ContextOptions` gained `event_logger`; build it with
+  `..Default::default()`.
+- **BREAKING:** the `in` operator takes the list first, `[haystack, needle]`,
+  as in javascript-sdk. Audiences written needle-first must be updated.
 
 ## [0.1.0]
 
