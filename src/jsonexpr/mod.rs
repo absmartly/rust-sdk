@@ -1,5 +1,6 @@
 pub mod evaluator;
 pub mod operators;
+pub mod semver;
 
 use evaluator::Evaluator;
 use serde_json::Value;

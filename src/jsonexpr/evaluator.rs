@@ -32,6 +32,11 @@ impl Evaluator {
                         "gte" => return operators::gte_op(self, value),
                         "lt" => return operators::lt_op(self, value),
                         "lte" => return operators::lte_op(self, value),
+                        "semver_eq" => return operators::semver_eq_op(self, value),
+                        "semver_gt" => return operators::semver_gt_op(self, value),
+                        "semver_gte" => return operators::semver_gte_op(self, value),
+                        "semver_lt" => return operators::semver_lt_op(self, value),
+                        "semver_lte" => return operators::semver_lte_op(self, value),
                         _ => {}
                     }
                 }
