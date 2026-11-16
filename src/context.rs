@@ -4096,6 +4096,8 @@ mod tests {
             // then fails the bounds check instead of moving on.
             json!({"type": "assign", "variant": 2147483648_i64}),
             json!({"type": "assign", "variant": -2147483649_i64}),
+            // Would wrap to 1 if narrowed to i32 before the bounds check.
+            json!({"type": "assign", "variant": 4294967297_i64}),
             json!({"type": "assign", "variant": 1e300}),
             json!({"type": "split", "percentages": "50/50"}),
         ] {
@@ -4131,6 +4133,10 @@ mod tests {
         exp.traffic_split = vec![1.0, 0.0];
         let mut ctx = Context::new(make_context_data(vec![exp]));
         ctx.set_unit("session_id", "user").unwrap();
+        assert_eq!(
+            ctx.peek_variable_value("color", "none").unwrap(),
+            json!("blue")
+        );
         assert_eq!(ctx.treatment("rules_exp").unwrap(), 2);
         assert!(exposures(&mut ctx)[0].rule_override);
     }
