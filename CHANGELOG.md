@@ -14,7 +14,9 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   matching rule wins over the audience, traffic and custom assignments.
   `set_override()` still wins over every rule.
 - `semver_eq`, `semver_gt`, `semver_gte`, `semver_lt` and `semver_lte`
-  operators for audiences and rule conditions.
+  operators for audiences and rule conditions, ordered as in javascript-sdk
+  (UTF-16 order for pre-release identifiers; numbers converted like JS,
+  including `1e+21`).
 - `SDK_NAME`, `SDK_VERSION` and `SDK_AGENT` constants.
 - Exposures carry `ruleOverride` so the backend can exclude rule-assigned
   exposures from analysis.

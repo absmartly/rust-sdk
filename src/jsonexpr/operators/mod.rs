@@ -176,6 +176,18 @@ pub fn lte_op(evaluator: &Evaluator, args: &Value) -> Value {
     })
 }
 
+/// `string_convert`, plus JavaScript's `toFixed` fallback to exponent notation
+/// (`1e+21`) from 1e21 up. Kept local to the semver operators so the other
+/// operators' conversion is unchanged.
+fn semver_string(evaluator: &Evaluator, value: &Value) -> Option<String> {
+    match value.as_f64() {
+        Some(f) if f.is_finite() && f.abs() >= 1e21 => {
+            Some(format!("{:e}", f).replacen('e', "e+", 1))
+        }
+        _ => evaluator.string_convert(value),
+    }
+}
+
 /// Compare two operands as semantic versions (see [`super::semver`]). Numbers
 /// and booleans are converted to strings first; null when either operand
 /// cannot be converted or has no version core.
@@ -185,7 +197,7 @@ fn semver_compared(
     test: impl FnOnce(std::cmp::Ordering) -> bool,
 ) -> Value {
     binary(evaluator, args, |lhs, rhs| {
-        let (Some(lhs), Some(rhs)) = (evaluator.string_convert(lhs), evaluator.string_convert(rhs))
+        let (Some(lhs), Some(rhs)) = (semver_string(evaluator, lhs), semver_string(evaluator, rhs))
         else {
             return Value::Null;
         };
@@ -870,6 +882,28 @@ mod tests {
         assert_eq!(v(semver_lt_op, json!(2)), json!(false));
         assert_eq!(v(semver_lte_op, json!(2.5)), json!(true));
         assert_eq!(v(semver_lte_op, json!("2.4")), json!(false));
+    }
+
+    #[test]
+    fn test_semver_numeric_operands_convert_like_javascript() {
+        // Each pair is semver_eq in javascript-sdk.
+        let evaluator = make_evaluator();
+        for (lhs, rhs) in [
+            (json!(1e-7), "0.0000001"),
+            (json!(1.0000000000000002), "1"),
+            (json!(1e-16), "0"),
+            (json!(1e21), "1e+21"),
+            (json!(1.5e300), "1.5e+300"),
+            (json!(2), "2.0.0"),
+        ] {
+            assert_eq!(
+                semver_eq_op(&evaluator, &json!([{"value": lhs}, {"value": rhs}])),
+                json!(true),
+                "{} vs {}",
+                lhs,
+                rhs
+            );
+        }
     }
 
     #[test]
