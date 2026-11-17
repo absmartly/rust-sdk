@@ -75,5 +75,9 @@ fn publish_body_without_holdouts_is_unchanged() {
     if std::env::var_os("RECORD_GOLDEN").is_some() {
         std::fs::write("tests/data/publish_without_holdouts.json", &actual).unwrap();
     }
-    assert_eq!(actual, GOLDEN);
+    // Compared as JSON values so a CRLF checkout of the golden file (Windows)
+    // still matches. Serialization writes struct fields in declaration order,
+    // so only line endings are lost by not comparing the text.
+    let golden: Value = serde_json::from_str(GOLDEN).unwrap();
+    assert_eq!(serde_json::to_value(&bodies).unwrap(), golden);
 }
