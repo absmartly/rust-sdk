@@ -49,7 +49,8 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   literals must set them, for example by adding `assignment_rules: String::new()`
   and `rule_override: false`. `ContextData` gained `holdouts` and
   `ExperimentData` gained `holdout_ids` and `holdout_type` the same way
-  (`holdouts: vec![]`, `holdout_ids: vec![]`, `holdout_type: None`).
+  (`holdouts: vec![]`, `holdout_ids: vec![]`, `holdout_type: None`);
+  exhaustive destructuring patterns need `..`.
   `Assignment` is unchanged.
 - **BREAKING:** the crate is imported as `absmartly`, and the client types
   were renamed. `ABsmartly` became `Client`, `ABsmartlyBuilder` became

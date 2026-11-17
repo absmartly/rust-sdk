@@ -2454,3 +2454,37 @@ fn refresh_flags_coverage_only_for_covered_entries() {
     assert!(stale(&ctx, "exp_covered"));
     assert!(!stale(&ctx, "exp_plain"));
 }
+
+// An overridden or rule-won held-out experiment is not a control fallback:
+// a later suppressed experiment still supplies its control value.
+#[test]
+fn overridden_or_rule_won_experiment_is_not_the_control_fallback() {
+    for rule_won in [false, true] {
+        let mut first = covered_by(experiment(1, "exp_first"), &[11]);
+        first["variants"] = json!([
+            {"config": "{\"other\":\"x\"}"},
+            {"config": "{\"other\":\"y\"}"}
+        ]);
+        if rule_won {
+            first["assignmentRules"] = json!(US_RULE);
+        }
+        let second = with_variables(covered_by(experiment(2, "exp_second"), &[11]), "color");
+        let mut ctx = context(UID, single_holdout(HOLDOUT_A, vec![first, second]));
+        if rule_won {
+            ctx.set_attribute("country", "US").unwrap();
+        } else {
+            ctx.set_override("exp_first", 1).unwrap();
+        }
+        // Make exp_first a candidate for `color` too, without the key.
+        ctx.index_variables
+            .get_mut("color")
+            .unwrap()
+            .insert(0, "exp_first".to_string());
+
+        assert_eq!(
+            ctx.peek_variable_value("color", "default").unwrap(),
+            json!("control"),
+            "rule_won {rule_won}"
+        );
+    }
+}
