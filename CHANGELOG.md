@@ -24,7 +24,7 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   `ExperimentData.holdout_ids` are read, and a unit that a covering holdout
   holds out gets variant 0 and control variables, with no exposure for the
   experiment. Every covering holdout queues its own exposure once per
-  context. A three-arm holdout's arm 1 holds units out of non-full-on
+  context and unit type. A three-arm holdout's arm 1 holds units out of non-full-on
   experiments only; the number of arms comes from the holdout's `split`.
   `set_override()` and a matching assignment rule win over a holdout.
   Payloads without holdouts assign and publish exactly as before.

@@ -23,8 +23,7 @@ struct Experiment {
     /// `assignment_rules`, so cached assignments compare it instead of the
     /// rule text.
     rules_rev: u64,
-    /// The holdouts named by `data.holdout_ids` that exist in the payload,
-    /// sorted by id. Empty for an uncovered experiment.
+    /// Sorted by id and unique, as in JS.
     holdouts: Vec<Arc<ExperimentData>>,
 }
 
@@ -106,7 +105,6 @@ pub struct Context {
     rules_rev: u64,
     index: HashMap<String, Experiment>,
     index_variables: HashMap<String, Vec<String>>,
-    holdouts_by_id: HashMap<i64, Arc<ExperimentData>>,
     /// Holdout arms by (holdout id, covered experiment's unit type); kept
     /// across refreshes and replaced only when the iteration changes.
     holdout_assignments: HashMap<(i64, String), Arc<HoldoutAssignment>>,
@@ -142,7 +140,6 @@ impl Context {
             rules_rev: 0,
             index: HashMap::new(),
             index_variables: HashMap::new(),
-            holdouts_by_id: HashMap::new(),
             holdout_assignments: HashMap::new(),
             assigners: HashMap::new(),
             hashes: HashMap::new(),
@@ -272,7 +269,7 @@ impl Context {
         self.data = data;
         let mut previous = std::mem::take(&mut self.index);
         self.index_variables.clear();
-        self.holdouts_by_id = self
+        let holdouts_by_id: HashMap<i64, Arc<ExperimentData>> = self
             .data
             .holdouts
             .iter()
@@ -342,7 +339,7 @@ impl Context {
             let mut holdouts: Vec<Arc<ExperimentData>> = experiment
                 .holdout_ids
                 .iter()
-                .filter_map(|id| self.holdouts_by_id.get(id).cloned())
+                .filter_map(|id| holdouts_by_id.get(id).cloned())
                 .collect();
             holdouts.sort_by_key(|holdout| holdout.id);
             holdouts.dedup_by_key(|holdout| holdout.id);
@@ -1053,8 +1050,7 @@ impl Context {
         };
         let mut rule_state = RuleState::default();
 
-        // Covering holdouts are resolved for overrides too: their own
-        // exposures are owed whenever the experiment is exposed.
+        // Resolved for overrides too: their holdout exposures are still owed.
         let holdouts = self.resolve_holdouts(experiment_name);
         let suppressed = exp_data_opt.as_ref().is_some_and(|exp| {
             holdouts.iter().any(|h| {
@@ -1215,19 +1211,15 @@ impl Context {
             .collect()
     }
 
-    /// The unit's arm in `holdout` for `unit_type`, drawn once per holdout
-    /// iteration: a same-iteration seed or split edit keeps the arm, so an
-    /// exposed unit never lands in a second arm.
+    /// The unit's arm in `live` (the holdout as in the current data) for
+    /// `unit_type`, drawn once per holdout iteration: a same-iteration seed or
+    /// split edit keeps the arm, so an exposed unit never lands in a second
+    /// arm.
     fn holdout_assignment(
         &mut self,
-        holdout: &ExperimentData,
+        live: &ExperimentData,
         unit_type: &str,
     ) -> Option<Arc<HoldoutAssignment>> {
-        let live = self
-            .holdouts_by_id
-            .get(&holdout.id)
-            .cloned()
-            .unwrap_or_else(|| Arc::new(holdout.clone()));
         let key = (live.id, unit_type.to_string());
         if let Some(cached) = self.holdout_assignments.get(&key) {
             if cached.iteration == live.iteration {

@@ -1037,10 +1037,11 @@ fn detached_treatment_returns_the_replacement_variant() {
     assert_eq!(ctx.pending(), 1);
 }
 
-// Java bounds a retry loop between threads; here every exposure is queued
-// once and a repeated read queues nothing.
+// Ported from Java's treatmentExposureSettlesAfterTwoConsecutiveRetirements,
+// whose retry loop has no Rust equivalent: a repeated treatment queues one
+// exposure.
 #[test]
-fn treatment_exposure_settles_after_two_consecutive_retirements() {
+fn repeated_treatment_queues_one_exposure() {
     let mut ctx = context(
         UID,
         data(
@@ -1058,8 +1059,10 @@ fn treatment_exposure_settles_after_two_consecutive_retirements() {
     assert_eq!(ctx.pending(), 1);
 }
 
+// Ported from Java's exposureSettlementStopsAfterTheBoundedNumberOfRetirements:
+// a peek queues nothing.
 #[test]
-fn exposure_settlement_stops_after_the_bounded_number_of_retirements() {
+fn peek_queues_no_exposure() {
     let mut ctx = context(
         UID,
         data(vec![], vec![experiment_full_on(1, "exp_bounded_retry", 1)]),
@@ -1703,8 +1706,10 @@ fn holdout_with_empty_split_is_ignored_and_experiment_assigns_normally() {
     );
 }
 
-// A stale holdout reference (old iteration and seed) resolves through the
-// live definition, so it returns the newer, already-exposed arm.
+// Java feeds a stale holdout object into its trigger path. Here holdouts are
+// always resolved from the current index, so the equivalent is an
+// experiment first resolved after the iteration bump: it reuses the newer,
+// already-exposed arm instead of drawing or exposing again.
 #[test]
 fn stale_holdout_reference_never_overwrites_newer_pinned_cache_entry() {
     let f = || covered_by(experiment(1, "exp_f"), &[11]);
@@ -1719,17 +1724,18 @@ fn stale_holdout_reference_never_overwrites_newer_pinned_cache_entry() {
     let mut iteration2 = holdout(11, "holdout_h", HOLDOUT_B);
     iteration2["iteration"] = json!(2);
     let g = covered_by(experiment(2, "exp_g"), &[11]);
-    ctx.refresh_with(data(vec![iteration2], vec![f(), g]));
+    let late = covered_by(experiment(3, "exp_late"), &[11]);
+    ctx.refresh_with(data(vec![iteration2], vec![f(), g, late]));
 
     assert_eq!(ctx.treatment("exp_g").unwrap(), NORMAL_VARIANT);
     assert_eq!(ctx.pending(), 3);
-
-    let stale: ExperimentData =
-        serde_json::from_value(holdout(11, "holdout_h", HOLDOUT_A)).unwrap();
-    let resolved = ctx.holdout_assignment(&stale, UNIT_TYPE).unwrap();
-
-    assert_eq!((resolved.iteration, resolved.variant), (2, 1));
-    assert!(resolved.exposed.load(Ordering::Relaxed));
+    assert_eq!(ctx.peek("exp_late").unwrap(), NORMAL_VARIANT);
+    let pinned = ctx.assignments["exp_late"].holdouts[0]
+        .assignment
+        .clone()
+        .unwrap();
+    assert_eq!((pinned.iteration, pinned.variant), (2, 1));
+    assert!(pinned.exposed.load(Ordering::Relaxed));
     assert_eq!(
         queued(&mut ctx),
         vec![
@@ -1958,8 +1964,6 @@ fn shared_variable_key_prefers_earlier_assigned_over_later_rule_won_experiment()
     );
     assert_eq!(ctx.peek("exp_rule_won").unwrap(), 1);
 }
-
-// ---- Beyond the Java port -------------------------------------------------
 
 #[test]
 fn is_held_out_by_follows_the_arm_count() {
@@ -2366,4 +2370,43 @@ fn malformed_unused_holdout_fields_keep_the_holdout() {
         queued(&mut ctx)
     };
     assert_eq!(arm(signed), arm(unsigned));
+}
+
+// A holdout iteration bump re-resolves an exposed rule win, so the new
+// iteration's holdout exposure fires along with the rule exposure.
+#[test]
+fn iteration_bump_on_exposed_rule_win_fires_the_new_holdout_iteration() {
+    let mut exp = covered_by(experiment(1, "exp_rule_iter"), &[11]);
+    exp["assignmentRules"] = json!(US_RULE);
+    let mut ctx = context(UID, single_holdout(HOLDOUT_A, vec![exp.clone()]));
+    ctx.set_attribute("country", "US").unwrap();
+    assert_eq!(ctx.treatment("exp_rule_iter").unwrap(), 1);
+    let before = ctx.pending();
+
+    let mut h = holdout(11, "holdout_a", HOLDOUT_A);
+    h["iteration"] = json!(2);
+    ctx.refresh_with(data(vec![h], vec![exp]));
+
+    assert_eq!(ctx.treatment("exp_rule_iter").unwrap(), 1);
+    assert_eq!(ctx.pending(), before + 2);
+}
+
+// An override flagged by a coverage change and then removed from the data
+// keeps its exposed assignment, as in JS.
+#[test]
+fn override_kept_when_experiment_disappears_after_coverage_flag() {
+    let exp = covered_by(experiment(1, "exp_gone"), &[11]);
+    let mut ctx = context(
+        UID_NOT_HELD_OUT,
+        single_holdout(HOLDOUT_A, vec![exp.clone()]),
+    );
+    ctx.set_override("exp_gone", 1).unwrap();
+    ctx.treatment("exp_gone").unwrap();
+    let pending = ctx.pending();
+
+    ctx.refresh_with(single_holdout(HOLDOUT_A, vec![exp]));
+    ctx.refresh_with(single_holdout(HOLDOUT_A, vec![]));
+
+    assert_eq!(ctx.treatment("exp_gone").unwrap(), 1);
+    assert_eq!(ctx.pending(), pending);
 }
