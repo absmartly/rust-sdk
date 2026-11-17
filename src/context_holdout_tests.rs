@@ -2410,3 +2410,47 @@ fn override_kept_when_experiment_disappears_after_coverage_flag() {
     assert_eq!(ctx.treatment("exp_gone").unwrap(), 1);
     assert_eq!(ctx.pending(), pending);
 }
+
+// Only a held-out unit reads control values: an experiment that is not
+// assigned for another reason (strict audience mismatch, missing unit)
+// still returns the caller's default, as on main and in JS.
+#[test]
+fn not_assigned_uncovered_experiment_variables_return_the_default() {
+    let mut strict = with_config(experiment(1, "exp_strict"), 0, json!({"color": "red"}));
+    strict["audienceStrict"] = json!(true);
+    strict["audience"] = json!(r#"{"filter":[{"eq":[{"var":"country"},{"value":"US"}]}]}"#);
+    let no_unit = with_config(
+        experiment_with(2, "exp_nounit", "user_id", 0),
+        0,
+        json!({"size": "big"}),
+    );
+    let mut ctx = context(UID, data(vec![], vec![strict, no_unit]));
+    ctx.set_attribute("country", "FR").unwrap();
+
+    for key in ["color", "size"] {
+        assert_eq!(ctx.peek_variable_value(key, "dflt").unwrap(), json!("dflt"));
+        assert_eq!(ctx.variable_value(key, "dflt").unwrap(), json!("dflt"));
+    }
+}
+
+// Coverage is only flagged for entries that had or now have holdouts, so a
+// refresh of uncovered experiments leaves the warmed read untouched.
+#[test]
+fn refresh_flags_coverage_only_for_covered_entries() {
+    let exps = || {
+        vec![
+            covered_by(experiment(1, "exp_covered"), &[11]),
+            experiment(2, "exp_plain"),
+        ]
+    };
+    let mut ctx = context(UID, single_holdout(HOLDOUT_A, exps()));
+    ctx.treatment("exp_covered").unwrap();
+    ctx.treatment("exp_plain").unwrap();
+
+    ctx.refresh_with(single_holdout(HOLDOUT_A, exps()));
+
+    let stale =
+        |ctx: &Context, name: &str| ctx.assignments[name].coverage_stale.load(Ordering::Relaxed);
+    assert!(stale(&ctx, "exp_covered"));
+    assert!(!stale(&ctx, "exp_plain"));
+}
