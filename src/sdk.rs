@@ -534,6 +534,7 @@ mod tests {
     fn make_context_data() -> ContextData {
         ContextData {
             experiments: vec![],
+            holdouts: vec![],
         }
     }
 

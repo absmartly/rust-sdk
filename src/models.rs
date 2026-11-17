@@ -55,11 +55,68 @@ where
     Ok(v as u32)
 }
 
+/// `holdouts` is lenient like the rest of the payload: `null` or a non-array
+/// means none, and an entry that is not a valid experiment object is dropped
+/// on its own instead of failing the whole context.
+fn deserialize_holdouts<'de, D>(deserializer: D) -> Result<Vec<ExperimentData>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| serde_json::from_value(item).ok())
+            .collect(),
+        _ => Vec::new(),
+    })
+}
+
+/// `holdoutIds` keeps the integral ids (`11` or `11.0`) and ignores
+/// anything else, so a malformed list only loses its bad entries.
+fn deserialize_holdout_ids<'de, D>(deserializer: D) -> Result<Vec<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|id| {
+                id.as_i64().or_else(|| {
+                    id.as_f64()
+                        .filter(|f| f.fract() == 0.0 && f.abs() < 9.007_199_254_740_992e15)
+                        .map(|f| f as i64)
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    })
+}
+
+fn deserialize_lenient_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(s) => Some(s),
+        _ => None,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextData {
     #[serde(default)]
     pub experiments: Vec<ExperimentData>,
+    /// The holdouts that experiments reference through
+    /// [`ExperimentData::holdout_ids`]. Each one is an experiment-shaped
+    /// entry; only `id`, `name`, `iteration`, `seedHi`, `seedLo` and `split`
+    /// are read, and an entry with an empty `split` is ignored.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_holdouts",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub holdouts: Vec<ExperimentData>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +160,22 @@ pub struct ExperimentData {
         skip_serializing_if = "String::is_empty"
     )]
     pub assignment_rules: String,
+    /// The ids of the [`ContextData::holdouts`] covering this experiment.
+    /// Ids with no matching holdout are ignored.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_holdout_ids",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub holdout_ids: Vec<i64>,
+    /// Set on holdout entries (`"full"` or `"all_full_on"`). Informational
+    /// only: the number of arms is read from `split`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lenient_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub holdout_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
