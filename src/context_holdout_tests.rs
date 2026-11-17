@@ -560,6 +560,14 @@ fn reuses_cached_held_out_assignment_with_custom_assignment() {
     assert_eq!(ctx.treatment("exp_holdout_custom_cache").unwrap(), 0);
     assert_eq!(ctx.treatment("exp_holdout_custom_cache").unwrap(), 0);
     assert_eq!(ctx.pending(), 1);
+    // The custom assignment never applies while held out, so it is not a
+    // reason to rebuild (and forget the exposure of) the cached assignment.
+    assert_eq!(ctx.peek("exp_holdout_custom_cache").unwrap(), 0);
+    assert!(
+        ctx.assignments["exp_holdout_custom_cache"]
+            .assignment
+            .exposed
+    );
 }
 
 #[test]
@@ -2161,4 +2169,99 @@ fn first_suppressed_candidate_decides_the_control_fallback() {
         ctx.peek_variable_value("color", "default").unwrap(),
         json!("default")
     );
+}
+
+// JS sorts and de-duplicates the covering holdouts by id: exposures go out
+// in id order, and a repeated id counts once, so a refresh listing the same
+// set without the repeat is not a coverage change (no second exposure).
+#[test]
+fn holdout_ids_are_sorted_and_deduplicated() {
+    let holdouts = || {
+        vec![
+            holdout(12, "holdout_b", HOLDOUT_B),
+            holdout(11, "holdout_a", HOLDOUT_A),
+        ]
+    };
+    let mut ctx = context(
+        UID_NOT_HELD_OUT,
+        data(
+            holdouts(),
+            vec![covered_by(experiment(1, "exp_ordered"), &[12, 11, 12])],
+        ),
+    );
+
+    assert_eq!(ctx.treatment("exp_ordered").unwrap(), 0);
+    ctx.refresh_with(data(
+        holdouts(),
+        vec![covered_by(experiment(1, "exp_ordered"), &[11, 12])],
+    ));
+    assert_eq!(ctx.treatment("exp_ordered").unwrap(), 0);
+
+    assert_eq!(
+        queued(&mut ctx),
+        vec![
+            normal(1, "exp_ordered", 0),
+            holdout_exposure(11, "holdout_a", 1),
+            holdout_exposure(12, "holdout_b", 1)
+        ]
+    );
+}
+
+// Moving coverage to another holdout id, same iteration, re-resolves.
+#[test]
+fn refresh_moving_coverage_to_another_holdout_re_resolves_experiment() {
+    let holdouts = || {
+        vec![
+            holdout(11, "holdout_b", HOLDOUT_B),
+            holdout(12, "holdout_a", HOLDOUT_A),
+        ]
+    };
+    let mut ctx = context(
+        UID,
+        data(
+            holdouts(),
+            vec![covered_by(experiment(1, "exp_moved"), &[11])],
+        ),
+    );
+
+    assert_eq!(ctx.treatment("exp_moved").unwrap(), NORMAL_VARIANT);
+    ctx.refresh_with(data(
+        holdouts(),
+        vec![covered_by(experiment(1, "exp_moved"), &[12])],
+    ));
+    assert_eq!(ctx.treatment("exp_moved").unwrap(), 0);
+
+    assert_eq!(
+        queued(&mut ctx),
+        vec![
+            normal(1, "exp_moved", NORMAL_VARIANT),
+            holdout_exposure(11, "holdout_b", 1),
+            holdout_exposure(12, "holdout_a", 0)
+        ]
+    );
+}
+
+// As in JS, a held-out unit's audience is not evaluated, so it is not
+// flagged as a mismatch, and attribute changes don't rebuild (and forget the
+// exposure of) the cached suppressed assignment.
+#[test]
+fn held_out_unit_skips_the_audience() {
+    let mut exp = covered_by(experiment(1, "exp_held_out_audience"), &[11]);
+    exp["audienceStrict"] = json!(true);
+    exp["audience"] = json!(r#"{"filter":[{"gte":[{"var":"age"},{"value":20}]}]}"#);
+    let mut ctx = context(UID, single_holdout(HOLDOUT_A, vec![exp]));
+    ctx.set_attribute("age", 5).unwrap();
+
+    assert_eq!(ctx.treatment("exp_held_out_audience").unwrap(), 0);
+    assert!(
+        !ctx.assignments["exp_held_out_audience"]
+            .assignment
+            .audience_mismatch
+    );
+
+    ctx.set_attribute("age", 30).unwrap();
+    ctx.set_attribute("age", 1).unwrap();
+    assert_eq!(ctx.peek("exp_held_out_audience").unwrap(), 0);
+    assert!(ctx.assignments["exp_held_out_audience"].assignment.exposed);
+    assert_eq!(ctx.pending(), 1);
 }

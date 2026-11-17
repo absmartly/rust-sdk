@@ -1150,7 +1150,6 @@ impl Context {
                 .as_ref()
                 .is_some_and(|exp| Self::experiment_matches(exp, &previous.assignment));
             if same_run
-                && Self::holdout_set_matches_pinned(&previous.holdouts, &holdouts)
                 && previous.assignment.exposed
                 && previous.rule.rule_override
                 && rule_state.rule_override
@@ -1242,13 +1241,6 @@ impl Context {
                 .iter()
                 .zip(pinned)
                 .all(|(f, p)| f.id == p.data.id && f.iteration == p.data.iteration)
-    }
-
-    fn holdout_set_matches_pinned(a: &[PinnedHoldout], b: &[PinnedHoldout]) -> bool {
-        a.len() == b.len()
-            && a.iter()
-                .zip(b)
-                .all(|(a, b)| a.data.id == b.data.id && a.data.iteration == b.data.iteration)
     }
 
     /// Queue the experiment's exposure (unless it is held out) and the
