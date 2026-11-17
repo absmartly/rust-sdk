@@ -2265,3 +2265,105 @@ fn held_out_unit_skips_the_audience() {
     assert!(ctx.assignments["exp_held_out_audience"].assignment.exposed);
     assert_eq!(ctx.pending(), 1);
 }
+
+// The not-held-out side of a same-iteration seed edit: the unit's own
+// exposure is not queued again either.
+#[test]
+fn refresh_with_seed_change_same_iteration_does_not_re_expose_not_held_out_unit() {
+    let exp = || covered_by(experiment(1, "exp_seed_edit_normal"), &[11]);
+    let mut ctx = context(UID_NOT_HELD_OUT, single_holdout(HOLDOUT_A, vec![exp()]));
+
+    let variant = ctx.treatment("exp_seed_edit_normal").unwrap();
+    assert_eq!(ctx.pending(), 2);
+
+    ctx.refresh_with(single_holdout(HOLDOUT_B, vec![exp()]));
+
+    assert_eq!(ctx.treatment("exp_seed_edit_normal").unwrap(), variant);
+    assert_eq!(ctx.pending(), 2);
+}
+
+// As in JS, coverage is compared when the experiment is next read, so a
+// refresh that removes coverage and a later one that restores it, with no
+// read in between, keep the exposed assignment.
+#[test]
+fn coverage_change_undone_before_the_next_read_does_not_re_expose() {
+    let covered = || covered_by(experiment(1, "exp_flip"), &[11]);
+    for uid in [UID, UID_NOT_HELD_OUT] {
+        let mut ctx = context(uid, single_holdout(HOLDOUT_A, vec![covered()]));
+        let variant = ctx.treatment("exp_flip").unwrap();
+        let pending = ctx.pending();
+
+        ctx.refresh_with(single_holdout(HOLDOUT_A, vec![experiment(1, "exp_flip")]));
+        ctx.refresh_with(single_holdout(HOLDOUT_A, vec![covered()]));
+
+        assert_eq!(ctx.treatment("exp_flip").unwrap(), variant);
+        assert_eq!(ctx.pending(), pending, "uid {uid}");
+        // Settled on that read, so later reads skip the comparison.
+        assert!(!ctx.assignments["exp_flip"]
+            .coverage_stale
+            .load(Ordering::Relaxed));
+    }
+}
+
+// A coverage change noticed on read rebuilds an exposed rule win even when
+// the rule gives the same variant, so the newly covering holdout fires.
+#[test]
+fn coverage_added_to_exposed_rule_win_fires_the_holdout() {
+    let mut exp = experiment(1, "exp_rule_cov");
+    exp["assignmentRules"] = json!(US_RULE);
+    let mut ctx = context(UID, single_holdout(HOLDOUT_A, vec![exp.clone()]));
+    ctx.set_attribute("country", "US").unwrap();
+
+    assert_eq!(ctx.treatment("exp_rule_cov").unwrap(), 1);
+    ctx.refresh_with(single_holdout(HOLDOUT_A, vec![covered_by(exp, &[11])]));
+    assert_eq!(ctx.treatment("exp_rule_cov").unwrap(), 1);
+
+    let exposures = queued(&mut ctx);
+    assert_eq!(
+        exposures.last(),
+        Some(&holdout_exposure(11, "holdout_a", 0))
+    );
+}
+
+// A holdout keeps holding units out when a field the SDK never reads is
+// null or the wrong type, as in JS; only the fields it uses matter.
+#[test]
+fn malformed_unused_holdout_fields_keep_the_holdout() {
+    let cases = [
+        ("name", Value::Null),
+        ("iteration", Value::Null),
+        ("variants", json!(null)),
+        ("variants", json!("x")),
+        ("trafficSplit", json!({"a": 1})),
+        ("audienceStrict", json!("yes")),
+        ("fullOnVariant", json!("2")),
+        ("audience", json!(5)),
+        ("unitType", json!(7)),
+        ("customFieldValues", json!([{"name": "x"}])),
+        ("applications", Value::Null),
+        ("id", json!(11.0)),
+    ];
+    for (key, value) in cases {
+        let mut h = holdout(11, "holdout_a", HOLDOUT_A);
+        h[key] = value.clone();
+        let exp = covered_by(experiment(1, "exp_covered"), &[11]);
+        let mut ctx = context(UID, data(vec![h], vec![exp]));
+        assert_eq!(ctx.treatment("exp_covered").unwrap(), 0, "{key}: {value}");
+    }
+
+    // Seeds are read like experiment seeds: signed or unsigned 32-bit.
+    let mut signed = holdout(11, "holdout_a", HOLDOUT_A);
+    signed["seedHi"] = json!(-1);
+    let unsigned = {
+        let mut h = signed.clone();
+        h["seedHi"] = json!(u32::MAX);
+        h
+    };
+    let arm = |h: Value| {
+        let exp = covered_by(experiment(1, "exp_covered"), &[11]);
+        let mut ctx = context(UID, data(vec![h], vec![exp]));
+        ctx.treatment("exp_covered").unwrap();
+        queued(&mut ctx)
+    };
+    assert_eq!(arm(signed), arm(unsigned));
+}

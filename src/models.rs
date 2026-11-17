@@ -55,19 +55,65 @@ where
     Ok(v as u32)
 }
 
-/// `holdouts` is lenient like the rest of the payload: `null` or a non-array
-/// means none, and an entry that is not a valid experiment object is dropped
-/// on its own instead of failing the whole context.
+/// `holdouts` is lenient: `null` or a non-array means none. Each entry is
+/// read field by field, keeping only what holdout resolution uses (`id`,
+/// `name`, `unitType`, `iteration`, `seedHi`, `seedLo`, `split` and
+/// `holdoutType`), so a malformed field the SDK never reads cannot drop the
+/// holdout and let its units into the experiments it covers. An entry
+/// without an integral `id` is dropped.
 fn deserialize_holdouts<'de, D>(deserializer: D) -> Result<Vec<ExperimentData>, D::Error>
 where
     D: Deserializer<'de>,
 {
     Ok(match serde_json::Value::deserialize(deserializer)? {
-        serde_json::Value::Array(items) => items
-            .into_iter()
-            .filter_map(|item| serde_json::from_value(item).ok())
-            .collect(),
+        serde_json::Value::Array(items) => items.iter().filter_map(holdout_from_value).collect(),
         _ => Vec::new(),
+    })
+}
+
+fn integral(value: &serde_json::Value) -> Option<i64> {
+    value.as_i64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|f| f.fract() == 0.0 && f.abs() < 9.007_199_254_740_992e15)
+            .map(|f| f as i64)
+    })
+}
+
+/// A seed as the backend sends it (signed or unsigned 32-bit); anything
+/// else reads as 0.
+fn seed(value: &serde_json::Value) -> u32 {
+    integral(value)
+        .filter(|v| (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(v))
+        .map_or(0, |v| v as u32)
+}
+
+fn holdout_from_value(item: &serde_json::Value) -> Option<ExperimentData> {
+    let string = |key: &str| item.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    let field = |key: &str| item.get(key).unwrap_or(&serde_json::Value::Null);
+    Some(ExperimentData {
+        id: integral(field("id"))?,
+        name: string("name").unwrap_or_default(),
+        unit_type: string("unitType"),
+        iteration: integral(field("iteration")).unwrap_or(0),
+        full_on_variant: 0,
+        traffic_split: Vec::new(),
+        traffic_seed_hi: 0,
+        traffic_seed_lo: 0,
+        audience: String::new(),
+        audience_strict: false,
+        split: field("split")
+            .as_array()
+            .and_then(|split| split.iter().map(|v| v.as_f64()).collect())
+            .unwrap_or_default(),
+        seed_hi: seed(field("seedHi")),
+        seed_lo: seed(field("seedLo")),
+        variants: Vec::new(),
+        variables: HashMap::new(),
+        custom_field_values: None,
+        assignment_rules: String::new(),
+        holdout_ids: Vec::new(),
+        holdout_type: string("holdoutType"),
     })
 }
 
@@ -78,16 +124,7 @@ where
     D: Deserializer<'de>,
 {
     Ok(match serde_json::Value::deserialize(deserializer)? {
-        serde_json::Value::Array(items) => items
-            .iter()
-            .filter_map(|id| {
-                id.as_i64().or_else(|| {
-                    id.as_f64()
-                        .filter(|f| f.fract() == 0.0 && f.abs() < 9.007_199_254_740_992e15)
-                        .map(|f| f as i64)
-                })
-            })
-            .collect(),
+        serde_json::Value::Array(items) => items.iter().filter_map(integral).collect(),
         _ => Vec::new(),
     })
 }
@@ -109,8 +146,9 @@ pub struct ContextData {
     pub experiments: Vec<ExperimentData>,
     /// The holdouts that experiments reference through
     /// [`ExperimentData::holdout_ids`]. Each one is an experiment-shaped
-    /// entry; only `id`, `name`, `iteration`, `seedHi`, `seedLo` and `split`
-    /// are read, and an entry with an empty `split` is ignored.
+    /// entry, of which only `id`, `name`, `unitType`, `iteration`, `seedHi`,
+    /// `seedLo`, `split` and `holdoutType` are kept; an entry with an empty
+    /// `split` is ignored.
     #[serde(
         default,
         deserialize_with = "deserialize_holdouts",

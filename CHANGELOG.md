@@ -38,6 +38,9 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   strict-audience experiments that filter on `application` or `environment`:
   before 0.2.0 they fell back to variant 0 unless a user attribute of the
   same name matched the audience.
+- An exposure is queued before the event logger receives it, as in
+  javascript-sdk, so `pending()` read inside an `exposure` callback already
+  counts it, and a panicking logger no longer loses the exposure.
 - The `X-Agent` header is now `absmartly-rust-sdk/<version>`. A configured
   `agent` is still sent as `User-Agent`.
 - **BREAKING (source):** `ExperimentData` gained `assignment_rules: String` and

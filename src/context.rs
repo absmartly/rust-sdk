@@ -73,7 +73,7 @@ struct RuleState {
     variant_count: usize,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 struct CachedAssignment {
     assignment: Assignment,
     rule: RuleState,
@@ -81,6 +81,10 @@ struct CachedAssignment {
     /// exposure of its own unless an override or a rule set the variant.
     suppressed: bool,
     holdouts: Vec<PinnedHoldout>,
+    /// A refresh changed the experiment's holdout coverage. Checked on the
+    /// next read, as in JS, so a change that a later refresh undoes keeps
+    /// the assignment and its exposure.
+    coverage_stale: AtomicBool,
 }
 
 pub type DataFetcher = Box<dyn Fn() -> Result<ContextData, String> + Send + Sync>;
@@ -857,20 +861,13 @@ impl Context {
                 .iter()
                 .filter_map(|(name, cached)| {
                     let assignment = &cached.assignment;
-                    // Holdout coverage only changes here, so it is checked
-                    // once per refresh rather than on every read. Overrides
-                    // are rebuilt too, so a newly covering holdout fires.
-                    let coverage_changed = index.get(name).is_some_and(|exp| {
-                        !Self::holdout_set_matches(&exp.holdouts, &cached.holdouts)
-                    });
                     if assignment.overridden {
-                        return coverage_changed.then(|| name.clone());
+                        return None;
                     }
-                    let should_remove = coverage_changed
-                        || match index.get(name) {
-                            None => assignment.assigned || cached.rule.rule_override,
-                            Some(exp) => !Self::experiment_matches(&exp.data, assignment),
-                        };
+                    let should_remove = match index.get(name) {
+                        None => assignment.assigned || cached.rule.rule_override,
+                        Some(exp) => !Self::experiment_matches(&exp.data, assignment),
+                    };
                     if should_remove {
                         Some(name.clone())
                     } else {
@@ -881,6 +878,16 @@ impl Context {
         };
         for name in to_remove {
             self.assignments.remove(&name);
+        }
+        // Holdout coverage can only change here, so it is compared once per
+        // refresh and the result is checked on the next read instead of the
+        // pinned holdouts being compared on every read.
+        for (name, cached) in self.assignments.iter_mut() {
+            if let Some(exp) = self.index.get(name) {
+                if !(cached.holdouts.is_empty() && exp.holdouts.is_empty()) {
+                    cached.coverage_stale.store(true, Ordering::Relaxed);
+                }
+            }
         }
         match serde_json::to_value(&self.data) {
             Ok(value) => self.log_event("refresh", Some(value)),
@@ -990,7 +997,12 @@ impl Context {
         let has_override = self.overrides.contains_key(experiment_name);
         let has_experiment = self.index.contains_key(experiment_name);
 
-        if let Some(cached) = self.assignments.get(experiment_name) {
+        // A refresh only flags a coverage change; it is compared here, on
+        // the next read, so a change a later refresh undoes is no change.
+        if let Some(cached) = self.assignments.get(experiment_name).filter(|cached| {
+            !cached.coverage_stale.load(Ordering::Relaxed)
+                || self.coverage_still_matches(experiment_name, cached)
+        }) {
             let a = &cached.assignment;
             if has_override {
                 if a.overridden && a.variant == self.overrides[experiment_name] {
@@ -1150,6 +1162,12 @@ impl Context {
                 .as_ref()
                 .is_some_and(|exp| Self::experiment_matches(exp, &previous.assignment));
             if same_run
+                && previous.holdouts.len() == holdouts.len()
+                && previous
+                    .holdouts
+                    .iter()
+                    .zip(&holdouts)
+                    .all(|(a, b)| a.data.id == b.data.id && a.data.iteration == b.data.iteration)
                 && previous.assignment.exposed
                 && previous.rule.rule_override
                 && rule_state.rule_override
@@ -1169,6 +1187,7 @@ impl Context {
                 rule: rule_state,
                 suppressed,
                 holdouts,
+                coverage_stale: AtomicBool::new(false),
             },
         );
     }
@@ -1231,6 +1250,18 @@ impl Context {
         });
         self.holdout_assignments.insert(key, assignment.clone());
         Some(assignment)
+    }
+
+    /// Settle a refresh's coverage flag: `true` (and the flag cleared) when
+    /// the experiment is still covered by the same holdouts.
+    #[cold]
+    fn coverage_still_matches(&self, experiment_name: &str, cached: &CachedAssignment) -> bool {
+        let matches = match self.index.get(experiment_name) {
+            Some(exp) => Self::holdout_set_matches(&exp.holdouts, &cached.holdouts),
+            None => true,
+        };
+        cached.coverage_stale.store(!matches, Ordering::Relaxed);
+        matches
     }
 
     /// Holdout coverage is compared by (id, iteration) only: a seed or split
