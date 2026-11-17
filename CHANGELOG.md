@@ -20,6 +20,14 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
 - `SDK_NAME`, `SDK_VERSION` and `SDK_AGENT` constants.
 - Exposures carry `ruleOverride` so the backend can exclude rule-assigned
   exposures from analysis.
+- Holdouts, as in javascript-sdk: `ContextData.holdouts` and
+  `ExperimentData.holdout_ids` are read, and a unit that a covering holdout
+  holds out gets variant 0 and control variables, with no exposure for the
+  experiment. Every covering holdout queues its own exposure once per
+  context. A three-arm holdout's arm 1 holds units out of non-full-on
+  experiments only; the number of arms comes from the holdout's `split`.
+  `set_override()` and a matching assignment rule win over a holdout.
+  Payloads without holdouts assign and publish exactly as before.
 
 ### Changed
 
@@ -36,7 +44,10 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   `Exposure` gained `rule_override: bool`. JSON without them still
   deserializes (they default to `""` and `false`), but exhaustive struct
   literals must set them, for example by adding `assignment_rules: String::new()`
-  and `rule_override: false`. `Assignment` is unchanged.
+  and `rule_override: false`. `ContextData` gained `holdouts` and
+  `ExperimentData` gained `holdout_ids` and `holdout_type` the same way
+  (`holdouts: vec![]`, `holdout_ids: vec![]`, `holdout_type: None`).
+  `Assignment` is unchanged.
 - **BREAKING:** the crate is imported as `absmartly`, and the client types
   were renamed. `ABsmartly` became `Client`, `ABsmartlyBuilder` became
   `ClientBuilder`, `SDKConfig` became `Config` and `SDKError` became `Error`,
