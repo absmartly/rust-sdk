@@ -3924,6 +3924,37 @@ fn refresh_enabling_strict_audience_rebuilds_the_slot() {
     assert_eq!(ctx.pending(), 2);
 }
 
+// A switchback whose served variant lacks the key does not supply it, so the
+// lookup moves on and only the experiment that supplies it is exposed.
+#[test]
+fn switchback_without_the_key_is_not_exposed_by_a_variable_lookup() {
+    let mut first = switchback(1, "exp_a", 2, HOUR);
+    first["variants"] = json!([{"name": "A", "config": r#"{"other":0}"#}, {"name": "B", "config": r#"{"other":1}"#}]);
+    first["variants"][1]["config"] = json!(r#"{"sb.arm":1}"#);
+    first["variants"][0]["config"] = json!(r#"{"other":0}"#);
+    let second = switchback(2, "exp_b", 2, HOUR);
+    let clock = Clock::new(ANCHOR + 5);
+    let mut ctx = context(&clock, data_of(vec![first, second]));
+    // Period 0 draws arm 0, whose variant has no sb.arm.
+    assert_eq!(EXPECTED_2_ARMS[0], 0);
+    assert_eq!(ctx.peek("exp_a").unwrap(), 0);
+    assert_eq!(
+        ctx.variable_value("sb.arm", -1).unwrap(),
+        json!(EXPECTED_2_ARMS[0])
+    );
+    assert_eq!(
+        queued(&mut ctx),
+        vec![exposure(
+            2,
+            "exp_b",
+            EXPECTED_2_ARMS[0],
+            ANCHOR + 5,
+            true,
+            true
+        )]
+    );
+}
+
 // ---- wire model ----
 
 // The cluster map keeps its JSON key order, which is neither sorted nor

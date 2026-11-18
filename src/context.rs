@@ -270,14 +270,6 @@ pub struct Context {
     /// Holdout arms by (holdout id, covered experiment's unit type); kept
     /// across refreshes and replaced only when the iteration changes.
     holdout_assignments: HashMap<(i64, String), Arc<HoldoutAssignment>>,
-    /// Switchback slots by experiment name. Unit experiments are cached in
-    /// `assignments` only.
-    switchbacks: HashMap<String, SwitchbackEpoch>,
-    /// Source of [`SwitchbackDef::generation`].
-    switchback_generations: u64,
-    /// The installed data has a switchback experiment. Reads check it before
-    /// looking for one, so payloads without switchbacks pay nothing.
-    has_switchbacks: bool,
     assigners: HashMap<String, VariantAssigner>,
     hashes: HashMap<String, String>,
     audience_matcher: AudienceMatcher,
@@ -289,6 +281,14 @@ pub struct Context {
     /// The client's `application` and `environment` names, seeded under
     /// user attributes when evaluating audiences and rules.
     system_attrs: HashMap<String, Value>,
+    /// Switchback slots by experiment name. Unit experiments are cached in
+    /// `assignments` only.
+    switchbacks: HashMap<String, SwitchbackEpoch>,
+    /// Source of [`SwitchbackDef::generation`].
+    switchback_generations: u64,
+    /// The installed data has a switchback experiment. Reads check it before
+    /// looking for one, so payloads without switchbacks pay nothing.
+    has_switchbacks: bool,
     /// Test seam for the clock; `None` reads the system time.
     clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
     #[cfg(test)]
@@ -799,6 +799,9 @@ impl Context {
     /// `Err` before the context is ready and once it is finalizing or finalized.
     pub fn peek(&mut self, experiment_name: &str) -> Result<i32, String> {
         self.check_ready(true)?;
+        if !self.has_switchbacks {
+            return Ok(self.assign_unit(experiment_name).assignment.variant);
+        }
         Ok(self.assign(experiment_name, &mut None).0.assignment.variant)
     }
 
@@ -807,6 +810,17 @@ impl Context {
     /// finalized.
     pub fn treatment(&mut self, experiment_name: &str) -> Result<i32, String> {
         self.check_ready(true)?;
+        if !self.has_switchbacks {
+            let a = &self.assign_unit(experiment_name).assignment;
+            let (variant, exposed) = (a.variant, a.exposed);
+            if !exposed {
+                if let Some(entry) = self.assignments.get_mut(experiment_name) {
+                    entry.assignment.exposed = true;
+                }
+                self.trigger_exposures(experiment_name, Slot::Unit);
+            }
+            return Ok(variant);
+        }
         let (cached, slot) = self.assign(experiment_name, &mut None);
         let (variant, exposed) = (cached.assignment.variant, cached.assignment.exposed);
 
@@ -886,7 +900,11 @@ impl Context {
         // One clock reading for the whole lookup, taken only for a switchback.
         let mut now = None;
         for exp_name in experiment_names {
-            let (cached, slot) = self.assign(&exp_name, &mut now);
+            let (cached, slot) = if self.has_switchbacks {
+                self.assign(&exp_name, &mut now)
+            } else {
+                (self.assign_unit(&exp_name), Slot::Unit)
+            };
             let a = &cached.assignment;
             let Some(variables) = &a.variables else {
                 continue;
@@ -1244,6 +1262,15 @@ impl Context {
         (self.cached(experiment_name, slot), slot)
     }
 
+    /// [`Context::assign`] for a payload without switchbacks: the same
+    /// single call into `refresh_assignment` the unit path always made, so
+    /// it inlines as it did before switchbacks.
+    #[inline(always)]
+    fn assign_unit(&mut self, experiment_name: &str) -> &CachedAssignment {
+        self.refresh_assignment(experiment_name);
+        &self.assignments[experiment_name]
+    }
+
     fn cached(&self, experiment_name: &str, slot: Slot) -> &CachedAssignment {
         match slot {
             Slot::Unit => &self.assignments[experiment_name],
@@ -1315,7 +1342,12 @@ impl Context {
                 }
             }
         }
+        self.rebuild_assignment(experiment_name, has_custom, has_override);
+    }
 
+    /// Build the unit assignment `refresh_assignment` found stale or missing.
+    #[inline(never)]
+    fn rebuild_assignment(&mut self, experiment_name: &str, has_custom: bool, has_override: bool) {
         // Slots of a switchback that is now a unit experiment, or gone.
         if !self.switchbacks.is_empty() {
             self.switchbacks.remove(experiment_name);
@@ -1765,6 +1797,7 @@ impl Context {
         else {
             return now;
         };
+        // Equal readings stamp the same either way; skip re-resolving.
         if state.resolved_at == now
             || !self.index.contains_key(experiment_name)
             || self.resolve_switchback_serving(experiment_name, now) == state.serving
