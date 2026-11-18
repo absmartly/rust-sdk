@@ -1690,27 +1690,6 @@ impl Context {
                 generation,
                 ..Default::default()
             });
-        // An already-exposed rule win with the same variant is kept, with only
-        // its rule bookkeeping refreshed, so it is not exposed again.
-        if let Some(previous) = epoch.slot_mut(period) {
-            let a = &previous.assignment;
-            if a.exposed
-                && previous.rule.rule_override
-                && rule_state.rule_override
-                && !a.overridden
-                && a.variant == assignment.variant
-                && a.id == data.id
-                && a.iteration == data.iteration
-                && a.full_on_variant == data.full_on_variant
-                && a.traffic_split
-                    .as_ref()
-                    .is_some_and(|ts| array_equals_shallow(&data.traffic_split, ts))
-            {
-                previous.rule = rule_state;
-                previous.assignment.attrs_seq = assignment.attrs_seq;
-                return;
-            }
-        }
         epoch.install(
             period,
             CachedAssignment {
