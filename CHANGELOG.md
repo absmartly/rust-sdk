@@ -39,7 +39,11 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   rules, strict audiences, full-on, traffic and custom assignments keep their
   unit-experiment exposure flags; holdouts never apply to a switchback. Each
   period is exposed once, stamped with the time that chose it. Payloads
-  without switchbacks assign and publish exactly as before.
+  without switchbacks assign and publish exactly as before. The
+  `switchbackClusters` order is kept when the data is decoded from JSON text
+  or bytes, not through a `serde_json::Value` (which sorts object keys).
+- `absmartly::switchback` with the platform's switchback draw:
+  `assign_switchback`, `base_hash` and `fisher_yates_permutation`.
 
 ### Changed
 

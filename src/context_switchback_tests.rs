@@ -3722,6 +3722,68 @@ fn repeated_attribute_names_resolve_to_the_latest() {
     );
 }
 
+// Payloads without switchbacks never look one up.
+#[test]
+fn unit_only_payloads_skip_the_switchback_lookup() {
+    let clock = Clock::new(ANCHOR);
+    let mut unit = sb(2, HOUR);
+    unit["randomizationType"] = json!("unit");
+    let mut ctx = context(&clock, data_of(vec![unit.clone()]));
+    ctx.treatment("exp_sb").unwrap();
+    ctx.peek("exp_sb").unwrap();
+    ctx.variable_value("sb.arm", -1).unwrap();
+    assert_eq!(ctx.switchback_lookups, 0);
+
+    ctx.refresh_with(data_of(vec![unit, switchback(2, "exp_other", 2, HOUR)]));
+    ctx.treatment("exp_sb").unwrap();
+    assert_eq!(ctx.switchback_lookups, 1);
+}
+
+// A variable lookup reads the clock once, so every switchback it exposes is
+// stamped with the reading that chose its period.
+#[test]
+fn variable_lookup_reads_the_clock_once_across_switchbacks() {
+    let mut first = switchback(1, "exp_a", 2, HOUR);
+    first["audience"] = json!(STRICT_GOLD_AUDIENCE);
+    first["audienceStrict"] = json!(true);
+    let second = switchback(2, "exp_b", 2, HOUR);
+    let clock = Clock::new(ANCHOR);
+    let mut ctx = context(&clock, data_of(vec![first, second]));
+    clock.set(ANCHOR + HOUR);
+    clock.next_read(ANCHOR + HOUR - 1);
+    assert_eq!(
+        ctx.variable_value("sb.arm", -1).unwrap(),
+        json!(EXPECTED_2_ARMS[0])
+    );
+    assert_eq!(
+        queued(&mut ctx),
+        vec![
+            seen(
+                1,
+                "exp_a",
+                UNIT_TYPE,
+                0,
+                ANCHOR + HOUR - 1,
+                false,
+                true,
+                false,
+                false,
+                false,
+                true,
+                false
+            ),
+            exposure(
+                2,
+                "exp_b",
+                EXPECTED_2_ARMS[0],
+                ANCHOR + HOUR - 1,
+                true,
+                true
+            ),
+        ]
+    );
+}
+
 // ---- wire model ----
 
 // The cluster map keeps its JSON key order, which is neither sorted nor
@@ -3747,6 +3809,40 @@ fn switchback_clusters_keep_their_declared_order() {
         reparsed.experiments[0].switchback_clusters,
         data.experiments[0].switchback_clusters
     );
+}
+
+// The order survives text decoding only: a serde_json::Value object sorts
+// its keys, so from_value serves the alphabetically first unit.
+#[test]
+fn cluster_order_survives_text_decoding_but_not_a_value() {
+    let text = format!(
+        r#"{{"experiments":[{}]}}"#,
+        sbc_clusters(&[(USER, "city"), ("device_id", "city")])
+            .to_string()
+            .replace(
+                &json!(ordered_clusters(&[(USER, "city"), ("device_id", "city")])
+                    .as_str()
+                    .unwrap())
+                .to_string(),
+                r#"{"user_id":"city","device_id":"city"}"#
+            )
+    );
+    let from_text: ContextData = serde_json::from_str(&text).unwrap();
+    let value: Value = serde_json::from_str(&text).unwrap();
+    let from_value: ContextData = serde_json::from_value(value).unwrap();
+    let serving_unit = |data: ContextData| {
+        let clock = Clock::new(NOW);
+        let mut ctx = bare_context(
+            &clock,
+            &[(USER, json!("u1")), ("device_id", json!("d1"))],
+            data,
+        );
+        ctx.set_attribute("city", "Lisboa").unwrap();
+        ctx.treatment("sbc").unwrap();
+        queued(&mut ctx)[0].2.clone()
+    };
+    assert_eq!(serving_unit(from_text).as_deref(), Some(USER));
+    assert_eq!(serving_unit(from_value).as_deref(), Some("device_id"));
 }
 
 // A repeated key keeps its first position and its last path, as Jackson's

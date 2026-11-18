@@ -285,6 +285,9 @@ pub struct Context {
     clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
     #[cfg(test)]
     rule_evaluations: usize,
+    /// Switchback lookups made by `assign`.
+    #[cfg(test)]
+    switchback_lookups: usize,
 }
 
 impl Context {
@@ -322,6 +325,8 @@ impl Context {
             clock: None,
             #[cfg(test)]
             rule_evaluations: 0,
+            #[cfg(test)]
+            switchback_lookups: 0,
         }
     }
 
@@ -1210,12 +1215,15 @@ impl Context {
         experiment_name: &str,
         now: &mut Option<i64>,
     ) -> (&CachedAssignment, Slot) {
-        let slot = if self.has_switchbacks
-            && self
-                .index
+        let slot = if self.has_switchbacks && {
+            #[cfg(test)]
+            {
+                self.switchback_lookups += 1;
+            }
+            self.index
                 .get(experiment_name)
                 .is_some_and(|exp| exp.switchback.is_some())
-        {
+        } {
             let now = *now.get_or_insert_with(|| self.now());
             self.refresh_switchback(experiment_name, now)
         } else {
