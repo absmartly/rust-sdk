@@ -18,8 +18,6 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   (UTF-16 order for pre-release identifiers; numbers converted like JS,
   including `1e+21`).
 - `SDK_NAME`, `SDK_VERSION` and `SDK_AGENT` constants.
-- Exposures carry `ruleOverride` so the backend can exclude rule-assigned
-  exposures from analysis.
 
 ### Changed
 
@@ -32,6 +30,13 @@ Breaking changes are listed against the released 0.1.0.
   strict-audience experiments that filter on `application` or `environment`:
   before 0.2.0 they fell back to variant 0 unless a user attribute of the
   same name matched the audience.
+- Every exposure, in the publish payload and the event logger's `exposure`
+  event, now carries `ruleOverride` (`false` unless a rule decided the
+  variant), so the backend can exclude rule-assigned exposures from analysis.
+- The event logger also receives `ready` when a context becomes ready, and
+  `error` (with `{"message": ...}`) when a context fails, a publish fails or
+  `refresh_with` is called on a context that is not ready or is finalized.
+  0.1.0 emitted neither.
 - The `X-Agent` header is now `absmartly-rust-sdk/<version>`. A configured
   `agent` is still sent as `User-Agent`.
 - **BREAKING (source):** `ExperimentData` gained `assignment_rules: String` and
@@ -78,6 +83,12 @@ Breaking changes are listed against the released 0.1.0.
   - A binary operator given a non-array or fewer than two operands returns
     null instead of false, and one given more than two compares the first
     two instead of returning false.
+- **BREAKING (behaviour):** `track` returns
+  `Err("Goal '<name>' properties must be of type object.")` and records
+  nothing when the properties are not an object or null, as in
+  javascript-sdk. 0.1.0 recorded the goal without properties and returned
+  `Ok`, so a call such as `track("purchase", 5)` now loses the goal, or
+  panics if the result is unwrapped.
 - Context errors spell the brand `ABsmartly` (for example
   `"ABsmartly Context is finalized."`). 0.1.0 used `ABSmartly`, so update
   code that matches on the error text.
