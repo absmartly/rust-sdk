@@ -2482,12 +2482,16 @@ fn traffic_restored_within_the_period_keeps_the_key() {
         queued(&mut ctx),
         vec![
             exposure(1, "exp_sb", 0, ANCHOR + 10, true, false),
-            exposure(1, "exp_sb", expected("Faro", 0), ANCHOR + 20, true, true),
+            // At ANCHOR + 20 the city is Lisboa, so the exposure is stamped
+            // when Faro was read (java-sdk stamps ANCHOR + 20).
+            exposure(1, "exp_sb", expected("Faro", 0), ANCHOR + 10, true, true),
         ]
     );
 }
 
 // An audience change re-resolves the slot (new exposure) but keeps its key.
+// The city changed since it was read, so the new exposure is stamped when
+// Lisboa was read (java-sdk stamps the later call).
 #[test]
 fn audience_revalidation_after_set_attribute_keeps_the_periods_bucket() {
     let mut experiment = attribute_switchback("city");
@@ -2511,7 +2515,7 @@ fn audience_revalidation_after_set_attribute_keeps_the_periods_bucket() {
                 "exp_sb",
                 UNIT_TYPE,
                 expected("Lisboa", 0),
-                ANCHOR + 20,
+                ANCHOR + 10,
                 true,
                 true,
                 false,
@@ -3878,6 +3882,66 @@ fn ineligible_slot_is_kept_after_an_unrelated_attribute() {
     // Kept, not rebuilt: a rebuilt slot would be unexposed.
     assert!(ctx.switchbacks["exp_sb"].periods[0].1.assignment.exposed);
     assert_eq!(ctx.rule_evaluations, 0);
+}
+
+// The Collector resolves the cluster again at exposedAt from the published
+// attributes. When a cluster attribute changed after the slot was resolved
+// in this period, the exposure is stamped with the resolving reading, so the
+// Collector sees the cluster the variant came from.
+#[test]
+fn exposure_after_a_cluster_change_is_stamped_when_the_cluster_was_read() {
+    let mut experiment = attribute_switchback("city");
+    experiment["switchbackClusterValues"] = json!(["Faro"]);
+    let clock = Clock::new(ANCHOR + 10);
+    let mut ctx = store_context(&clock, data_of(vec![experiment]));
+    ctx.set_attribute("city", "Faro").unwrap();
+    let faro = expected("Faro", 0);
+    assert_eq!(ctx.peek("exp_sb").unwrap(), faro);
+    clock.set(ANCHOR + 20);
+    ctx.set_attribute("city", "Lisboa").unwrap();
+    clock.set(ANCHOR + 30);
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), faro);
+    assert_eq!(
+        queued(&mut ctx),
+        vec![exposure(1, "exp_sb", faro, ANCHOR + 10, true, true)]
+    );
+    // At that exposedAt the published attributes give Faro, which is allowed.
+    let params = ctx.get_publish_params();
+    let at = params.exposures.as_ref().unwrap()[0].exposed_at;
+    let city = params
+        .attributes
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.name == "city" && a.set_at <= at)
+        .max_by_key(|a| a.set_at)
+        .unwrap();
+    assert_eq!(city.value, json!("Faro"));
+}
+
+// A refresh that turns on strict targeting rebuilds a cached slot whose
+// audience does not match, as a fresh context would serve it.
+#[test]
+fn refresh_enabling_strict_audience_rebuilds_the_slot() {
+    let mut loose = sb(2, HOUR);
+    loose["audience"] = json!(STRICT_GOLD_AUDIENCE);
+    let clock = Clock::new(ANCHOR + HOUR + 3);
+    let mut ctx = context(&clock, data_of(vec![loose.clone()]));
+    assert_eq!(ctx.peek("exp_sb").unwrap(), EXPECTED_2_ARMS[1]);
+    let mut strict = loose.clone();
+    strict["audienceStrict"] = json!(true);
+    ctx.try_refresh_with(data_of(vec![strict.clone()])).unwrap();
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), 0);
+    assert_eq!(
+        queued(&mut ctx),
+        vec![strict_mismatch_exposure(ANCHOR + HOUR + 3)]
+    );
+
+    // An audience edit alone also re-evaluates.
+    let mut matching = strict;
+    matching["audience"] = json!(r#"{"filter":[{"value":true}]}"#);
+    ctx.try_refresh_with(data_of(vec![matching])).unwrap();
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), EXPECTED_2_ARMS[1]);
+    assert_eq!(ctx.pending(), 2);
 }
 
 // ---- wire model ----

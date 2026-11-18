@@ -169,6 +169,14 @@ struct SwitchbackSlot {
     /// Read once per slot: a rebuild in the same period keeps it unless no
     /// linked unit was set (`Absent`).
     serving: Serving,
+    /// The clock reading `serving` was resolved at. The Collector resolves
+    /// the cluster again at `exposedAt`, so an exposure whose own reading
+    /// no longer gives `serving` is stamped with this one instead.
+    resolved_at: i64,
+    /// The targeting the slot was resolved under; a refresh that changes it
+    /// rebuilds the slot.
+    audience: String,
+    audience_strict: bool,
     /// The Collector records nothing for it: no linked unit, an ineligible
     /// cluster, or no draw (before the anchor or an unservable schedule).
     silent: bool,
@@ -1506,7 +1514,11 @@ impl Context {
             && a.traffic_split
                 .as_ref()
                 .is_some_and(|ts| array_equals_shallow(&data.traffic_split, ts));
-        if !same_run || !self.audience_matches(data, cached) {
+        if !same_run
+            || data.audience_strict != state.audience_strict
+            || data.audience != state.audience
+            || !self.audience_matches(data, cached)
+        {
             return false;
         }
         let (rules_rev, variant_count) = (exp.rules_rev, data.variants.len());
@@ -1564,9 +1576,11 @@ impl Context {
             .switchbacks
             .get(experiment_name)
             .and_then(|epoch| epoch.slot(period));
-        let serving = match previous.and_then(|c| c.switchback.as_ref()) {
-            Some(state) if state.serving != Serving::Absent => state.serving.clone(),
-            _ => self.resolve_switchback_serving(experiment_name, now),
+        let (serving, resolved_at) = match previous.and_then(|c| c.switchback.as_ref()) {
+            Some(state) if state.serving != Serving::Absent => {
+                (state.serving.clone(), state.resolved_at)
+            }
+            _ => (self.resolve_switchback_serving(experiment_name, now), now),
         };
         let fallback_unit = match &def.sources {
             Some(sources) => Some(sources[0].0.clone()),
@@ -1698,6 +1712,9 @@ impl Context {
                 rule: rule_state,
                 switchback: Some(Box::new(SwitchbackSlot {
                     serving,
+                    resolved_at,
+                    audience: data.audience.clone(),
+                    audience_strict: data.audience_strict,
                     silent,
                     custom,
                 })),
@@ -1725,6 +1742,34 @@ impl Context {
                 switchback::cluster_key(path.resolve_attribute(&attribute.value)?)
             },
         )
+    }
+
+    /// When a switchback slot's exposure is stamped: the exposing call's
+    /// reading `now`, unless the attributes at `now` no longer give the
+    /// slot's serving unit and cluster key (an attribute changed since the
+    /// slot was resolved in this period). Then it is the reading the serving
+    /// was resolved at, so the Collector, which resolves the cluster again at
+    /// `exposedAt`, serves the same cluster the variant came from.
+    fn switchback_exposed_at(&self, experiment_name: &str, slot: Slot, now: i64) -> i64 {
+        let Slot::Switchback { period, .. } = slot else {
+            return now;
+        };
+        let Some(state) = self
+            .switchbacks
+            .get(experiment_name)
+            .and_then(|epoch| epoch.slot(period))
+            .and_then(|cached| cached.switchback.as_ref())
+        else {
+            return now;
+        };
+        if state.resolved_at == now
+            || !self.index.contains_key(experiment_name)
+            || self.resolve_switchback_serving(experiment_name, now) == state.serving
+        {
+            now
+        } else {
+            state.resolved_at
+        }
     }
 
     /// The attribute the Collector records with an exposure at `now`: among
@@ -1826,7 +1871,7 @@ impl Context {
     fn trigger_exposures(&mut self, experiment_name: &str, slot: Slot) {
         let now = match slot {
             Slot::Unit => self.now(),
-            Slot::Switchback { now, .. } => now,
+            Slot::Switchback { now, .. } => self.switchback_exposed_at(experiment_name, slot, now),
         };
         let cached = match slot {
             Slot::Unit => self.assignments.get(experiment_name),

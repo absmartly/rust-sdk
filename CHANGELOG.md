@@ -38,7 +38,9 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   unservable schedules give variant 0 with no exposure. Overrides, assignment
   rules, strict audiences, full-on, traffic and custom assignments keep their
   unit-experiment exposure flags; holdouts never apply to a switchback. Each
-  period is exposed once, stamped with the time that chose it. Payloads
+  period is exposed once, stamped with the time that chose it (or, when a
+  cluster attribute changed since the period's cluster was read, with the time
+  it was read, so the Collector re-resolves the same cluster). Payloads
   without switchbacks assign and publish exactly as before. The
   `switchbackClusters` order is kept when the data is decoded from JSON text
   or bytes, not through a `serde_json::Value` (which sorts object keys).
