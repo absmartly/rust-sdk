@@ -763,7 +763,7 @@ impl Context {
     }
 
     /// Apply `new_data` as a refresh, keeping assignments that are still
-    /// valid. Returns `()` as in 0.1; if the context is not ready or is
+    /// valid. Returns `()` like 0.1's `refresh(data)`; if the context is not ready or is
     /// finalizing/finalized the data is left unchanged and an `error` event is
     /// emitted. Use [`Context::try_refresh_with`] to get the error back.
     pub fn refresh_with(&mut self, new_data: ContextData) {

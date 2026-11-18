@@ -63,6 +63,24 @@ Breaking changes are listed against the released 0.1.0.
   `..Default::default()`.
 - **BREAKING:** the `in` operator takes the list first, `[haystack, needle]`,
   as in javascript-sdk. Audiences written needle-first must be updated.
+- **BREAKING (behaviour):** audience and rule operators now follow
+  javascript-sdk, which **can change assignment** for strict-audience
+  experiments:
+  - A comparison (`eq`, `gt`, `gte`, `lt`, `lte`, `match`, `in`) with a null
+    operand is null (falsy). In 0.1.0, `eq(null, null)` was true, so an
+    audience that tests for a missing attribute with `eq … null` no longer
+    matches, and `not(eq … null)` now does.
+  - An empty `or` is true (it was false).
+  - `var` accepts the `{"path": ...}` form (it was always null).
+  - `in` converts the needle: a string haystack matches a number
+    (`in("a1b", 1)`), and array items match by comparison (`in([1], "1")`)
+    instead of deep equality.
+  - A binary operator given a non-array or fewer than two operands returns
+    null instead of false, and one given more than two compares the first
+    two instead of returning false.
+- Context errors spell the brand `ABsmartly` (for example
+  `"ABsmartly Context is finalized."`). 0.1.0 used `ABSmartly`, so update
+  code that matches on the error text.
 
 ## [0.1.0]
 
