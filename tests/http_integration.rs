@@ -101,14 +101,17 @@ async fn read_full_request(stream: &mut tokio::net::TcpStream) -> String {
 /// Start the mock server. Returns the base URL ("http://127.0.0.1:<port>")
 /// and the shared request log.
 async fn start_mock_server() -> (String, Log) {
+    // A single full-on experiment so a treatment produces a real exposure that
+    // ends up in the publish body. unit_type matches the unit we set below.
+    start_mock_server_with(r#"{"experiments":[{"id":1,"name":"exp_test","unitType":"session_id","iteration":1,"fullOnVariant":1,"trafficSplit":[0.0,1.0],"split":[0.5,0.5],"variants":[{"config":null},{"config":null}],"variables":{}}]}"#).await
+}
+
+/// Like [`start_mock_server`], answering GET /context with `get_body`.
+async fn start_mock_server_with(get_body: &'static str) -> (String, Log) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base = format!("http://{}", addr);
     let log: Log = Arc::new(Mutex::new(Vec::new()));
-
-    // A single full-on experiment so a treatment produces a real exposure that
-    // ends up in the publish body. unit_type matches the unit we set below.
-    let get_body = r#"{"experiments":[{"id":1,"name":"exp_test","unitType":"session_id","iteration":1,"fullOnVariant":1,"trafficSplit":[0.0,1.0],"split":[0.5,0.5],"variants":[{"config":null},{"config":null}],"variables":{}}]}"#;
 
     let log_clone = log.clone();
     tokio::spawn(async move {
@@ -330,4 +333,30 @@ async fn publish_returns_error_on_final_3xx_response() {
         .await
         .expect_err("a 304 publish response must be an error, not a panic");
     assert!(err.to_string().contains("304"), "unexpected error: {err}");
+}
+
+/// The fetched context keeps the `switchbackClusters` order: the first
+/// declared unit (`z_unit`, not alphabetically first) serves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fetched_switchback_keeps_the_declared_cluster_order() {
+    let (base, _log) = start_mock_server_with(
+        r#"{"experiments":[{"id":7,"name":"sb","unitType":"a_unit","iteration":1,"split":[0.5,0.5],"trafficSplit":[0.0,1.0],"variants":[{"config":null},{"config":null}],"randomizationType":"switchback","switchbackClusters":{"z_unit":"city","a_unit":"city"},"switchbackStartAt":1704067200000,"switchbackPeriodMs":1440000000000}]}"#,
+    )
+    .await;
+    let sdk = Client::builder()
+        .endpoint(&base)
+        .api_key("k")
+        .application("www")
+        .environment("production")
+        .build()
+        .unwrap();
+    let mut context = sdk
+        .create_context([("a_unit", "a1"), ("z_unit", "z1")], None)
+        .await
+        .unwrap();
+    context.set_attribute("city", "Lisboa").unwrap();
+    context.treatment("sb").unwrap();
+    let exposures = context.get_publish_params().exposures.unwrap();
+    assert_eq!(exposures.len(), 1);
+    assert_eq!(exposures[0].unit.as_deref(), Some("z_unit"));
 }

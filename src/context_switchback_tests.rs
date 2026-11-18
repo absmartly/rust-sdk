@@ -3784,6 +3784,102 @@ fn variable_lookup_reads_the_clock_once_across_switchbacks() {
     );
 }
 
+// A legacy-path switchback has no period, so an override on it is exposed
+// once, not once per period.
+#[test]
+fn override_on_a_legacy_switchback_is_exposed_once_across_periods() {
+    let mut legacy = sb(2, HOUR);
+    legacy["switchbackClusters"] = Value::Null;
+    let clock = Clock::new(ANCHOR + 10);
+    let mut ctx = context(&clock, data_of(vec![legacy]));
+    ctx.set_override("exp_sb", 1).unwrap();
+    for i in 0..3 {
+        clock.set(ANCHOR + 10 + i * HOUR);
+        assert_eq!(ctx.treatment("exp_sb").unwrap(), 1);
+    }
+    assert_eq!(
+        queued(&mut ctx),
+        vec![seen(
+            1,
+            "exp_sb",
+            UNIT_TYPE,
+            1,
+            ANCHOR + 10,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false
+        )]
+    );
+}
+
+// An override peeked before any linked unit was set is resolved again once
+// one is, so it is exposed under the serving unit, not the fallback.
+#[test]
+fn peeked_override_is_reresolved_when_a_linked_unit_is_set() {
+    let mut experiment = sb(2, HOUR);
+    experiment["switchbackClusters"] =
+        ordered_clusters(&[("device_id", "city"), ("user_id", "city")]);
+    let clock = Clock::new(ANCHOR + 10);
+    let mut ctx = bare_context(&clock, &[], parse_experiments(&[experiment]));
+    ctx.set_attribute("city", "Lisboa").unwrap();
+    ctx.set_override("exp_sb", 2).unwrap();
+    assert_eq!(ctx.peek("exp_sb").unwrap(), 2);
+    ctx.set_unit("user_id", "u1").unwrap();
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), 2);
+    assert_eq!(
+        queued(&mut ctx),
+        vec![seen(
+            1,
+            "exp_sb",
+            "user_id",
+            2,
+            ANCHOR + 10,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false
+        )]
+    );
+}
+
+// randomizationType is matched exactly, as in java-sdk.
+#[test]
+fn randomization_type_is_case_sensitive() {
+    let mut upper = sb(2, HOUR);
+    upper["randomizationType"] = json!("SWITCHBACK");
+    let clock = Clock::new(ANCHOR + 10);
+    let mut ctx = context(&clock, data_of(vec![upper.clone()]));
+    let variant = ctx.treatment("exp_sb").unwrap();
+    assert!(ctx.switchbacks.is_empty());
+    let mut twin = context(&clock, data_of(vec![unit_twin(upper)]));
+    assert_eq!(twin.treatment("exp_sb").unwrap(), variant);
+    assert_eq!(queued(&mut ctx), queued(&mut twin));
+}
+
+// An ineligible slot never consulted its rules, so an unrelated attribute
+// does not make it re-evaluate them or rebuild.
+#[test]
+fn ineligible_slot_is_kept_after_an_unrelated_attribute() {
+    let mut experiment = sb(2, HOUR);
+    experiment["assignmentRules"] = json!(ASSIGN_VARIANT_1);
+    experiment["switchbackClusterValues"] = json!(["other-store"]);
+    let clock = Clock::new(ANCHOR + 10);
+    let mut ctx = context(&clock, data_of(vec![experiment]));
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), 0);
+    ctx.set_attribute("unrelated", 1).unwrap();
+    assert_eq!(ctx.peek("exp_sb").unwrap(), 0);
+    // Kept, not rebuilt: a rebuilt slot would be unexposed.
+    assert!(ctx.switchbacks["exp_sb"].periods[0].1.assignment.exposed);
+    assert_eq!(ctx.rule_evaluations, 0);
+}
+
 // ---- wire model ----
 
 // The cluster map keeps its JSON key order, which is neither sorted nor
