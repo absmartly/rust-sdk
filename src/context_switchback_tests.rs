@@ -1536,6 +1536,90 @@ fn grid_refresh_to_a_lower_index_exposes_once() {
     assert_eq!(ctx.pending(), 3);
 }
 
+// An anchor change that keeps the period index is still a new epoch.
+#[test]
+fn anchor_change_with_the_same_period_index_reexposes() {
+    let clock = Clock::new(ANCHOR + HOUR + 10);
+    let mut ctx = context(&clock, data_of(vec![sb(2, 2 * HOUR)]));
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), EXPECTED_2_ARMS[0]);
+    let mut moved = sb(2, 2 * HOUR);
+    moved["switchbackStartAt"] = json!(ANCHOR + HOUR);
+    ctx.refresh_with(data_of(vec![moved]));
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), EXPECTED_2_ARMS[0]);
+    assert_eq!(
+        queued(&mut ctx),
+        vec![
+            exposure(
+                1,
+                "exp_sb",
+                EXPECTED_2_ARMS[0],
+                ANCHOR + HOUR + 10,
+                true,
+                true
+            ),
+            exposure(
+                1,
+                "exp_sb",
+                EXPECTED_2_ARMS[0],
+                ANCHOR + HOUR + 10,
+                true,
+                true
+            ),
+        ]
+    );
+}
+
+// An exposed override resolved before any linked unit was set keeps its
+// slot; when the override changes, the slot reads the serving unit again.
+#[test]
+fn changed_override_rereads_a_serving_unit_set_after_an_absent_resolution() {
+    let mut experiment = sb(2, HOUR);
+    experiment["switchbackClusters"] =
+        ordered_clusters(&[("device_id", "geo/city"), (UNIT_TYPE, CLUSTER_PATH)]);
+    let clock = Clock::new(ANCHOR + 10);
+    let mut ctx = bare_context(&clock, &[], parse_experiments(&[experiment]));
+    ctx.set_attribute(CLUSTER_PATH, CLUSTER_KEY).unwrap();
+    ctx.set_override("exp_sb", 1).unwrap();
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), 1);
+    ctx.set_unit(UNIT_TYPE, UID).unwrap();
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), 1);
+    ctx.set_override("exp_sb", 0).unwrap();
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), 0);
+    assert_eq!(
+        queued(&mut ctx),
+        vec![
+            seen(
+                1,
+                "exp_sb",
+                "device_id",
+                1,
+                ANCHOR + 10,
+                false,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false
+            ),
+            seen(
+                1,
+                "exp_sb",
+                UNIT_TYPE,
+                0,
+                ANCHOR + 10,
+                false,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false
+            ),
+        ]
+    );
+}
+
 #[test]
 fn period_length_refresh_to_a_lower_index_exposes_once() {
     let clock = Clock::new(ANCHOR + 100 * HOUR);
@@ -1668,6 +1752,42 @@ fn switchback_to_unit_to_identical_switchback_reresolves() {
     assert_eq!(ctx.treatment("exp_sb").unwrap(), EXPECTED_2_ARMS[0]);
     assert_eq!(ctx.treatment("exp_sb").unwrap(), EXPECTED_2_ARMS[0]);
     assert_eq!(ctx.pending(), 3);
+}
+
+// Each transition starts again, as in java-sdk: the unit assignment goes when
+// the experiment becomes a switchback, and the switchback's slots go when it
+// is a unit experiment again, which is exposed again.
+#[test]
+fn unit_to_switchback_to_identical_unit_reexposes() {
+    let clock = Clock::new(ANCHOR + HOUR + 10);
+    let mut unit = sb(2, HOUR);
+    unit["randomizationType"] = json!("unit");
+    let mut ctx = context(&clock, data_of(vec![unit.clone()]));
+    let variant = ctx.treatment("exp_sb").unwrap();
+    ctx.refresh_with(data_of(vec![sb(2, HOUR)]));
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), EXPECTED_2_ARMS[1]);
+    clock.set(ANCHOR + 2 * HOUR);
+    ctx.treatment("exp_sb").unwrap();
+    assert_eq!(ctx.switchbacks["exp_sb"].periods.len(), 2);
+    ctx.refresh_with(data_of(vec![unit]));
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), variant);
+    assert_eq!(ctx.pending(), 4);
+    assert_eq!(cached_slots(&ctx), 1);
+}
+
+// The traffic miss wins over a custom assignment (scenario 416).
+#[test]
+fn traffic_miss_wins_over_a_custom_assignment() {
+    let mut experiment = sb(3, HOUR);
+    experiment["trafficSplit"] = json!([1.0, 0.0]);
+    let clock = Clock::new(ANCHOR + 2 * HOUR);
+    let mut ctx = context(&clock, data_of(vec![experiment]));
+    ctx.set_custom_assignment("exp_sb", 2).unwrap();
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), 0);
+    assert_eq!(
+        queued(&mut ctx),
+        vec![exposure(1, "exp_sb", 0, ANCHOR + 2 * HOUR, true, false)]
+    );
 }
 
 #[test]

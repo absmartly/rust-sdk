@@ -52,12 +52,16 @@ pub fn fisher_yates_permutation(arm_count: usize, base_hash: u32) -> Option<Vec<
     buffer[0..4].copy_from_slice(&base_hash.to_le_bytes());
     for i in (1..arm_count).rev() {
         buffer[4..8].copy_from_slice(&(i as u32).to_le_bytes());
-        let prob = f64::from(murmur3_32(&buffer, 0)) * NORMALIZER;
-        // prob == 1.0 would map to i + 1.
-        let j = ((prob * (i + 1) as f64).floor() as usize).min(i);
-        permutation.swap(i, j);
+        permutation.swap(i, swap_index(murmur3_32(&buffer, 0), i));
     }
     Some(permutation)
+}
+
+/// `min(i, floor(step_hash / 0xffffffff * (i + 1)))`: the clamp keeps a
+/// step hash of `0xffffffff` (probability 1.0) from mapping to `i + 1`.
+fn swap_index(step_hash: u32, i: usize) -> usize {
+    let prob = f64::from(step_hash) * NORMALIZER;
+    ((prob * (i + 1) as f64).floor() as usize).min(i)
 }
 
 /// The cluster key an attribute value gives, or `None`: a non-empty string

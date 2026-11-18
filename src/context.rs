@@ -24,7 +24,7 @@ struct Experiment {
     /// `assignment_rules`, so cached assignments compare it instead of the
     /// rule text.
     rules_rev: u64,
-    /// Sorted by id and unique, as in JS. Always empty for a switchback:
+    /// Sorted by id and unique, as in JS. Never read for a switchback:
     /// holdouts never apply to one.
     holdouts: Vec<Arc<ExperimentData>>,
     /// Set when `data` is a switchback experiment.
@@ -80,7 +80,9 @@ fn switchback_period(def: &SwitchbackDef, experiment: &ExperimentData, now: i64)
     }
     let start = experiment.switchback_start_at?;
     let period_ms = experiment.switchback_period_ms?;
-    (now >= start).then(|| now.wrapping_sub(start).div_euclid(period_ms))
+    // now >= start >= 0, so the difference cannot overflow and floor
+    // division is plain division.
+    (now >= start).then(|| (now - start) / period_ms)
 }
 
 /// Everything that maps clusters and periods to variants: id, iteration,
@@ -525,15 +527,12 @@ impl Context {
             holdouts.sort_by_key(|holdout| holdout.id);
             holdouts.dedup_by_key(|holdout| holdout.id);
 
-            let switchback = is_switchback(experiment).then(|| {
-                holdouts.clear();
-                SwitchbackDef {
-                    generation: 0,
-                    sources: switchback::sources(experiment.switchback_clusters.as_deref()),
-                    seed: ((u64::from(experiment.seed_hi) << 32) | u64::from(experiment.seed_lo))
-                        as i64,
-                    servable: switchback_schedule_servable(experiment),
-                }
+            let switchback = is_switchback(experiment).then(|| SwitchbackDef {
+                generation: 0,
+                sources: switchback::sources(experiment.switchback_clusters.as_deref()),
+                seed: ((u64::from(experiment.seed_hi) << 32) | u64::from(experiment.seed_lo))
+                    as i64,
+                servable: switchback_schedule_servable(experiment),
             });
             let mut installed = Experiment {
                 data: experiment.clone(),
@@ -1547,7 +1546,9 @@ impl Context {
     /// unservable schedule it is a silent control, while rules, the audience
     /// and full-on still apply.
     fn rebuild_switchback(&mut self, experiment_name: &str, period: Option<i64>, now: i64) {
-        // A unit assignment left from before the experiment became a switchback.
+        // A unit assignment from before the experiment became a switchback:
+        // java-sdk drops it with the epoch, so a return to the same unit
+        // experiment is exposed again.
         if !self.assignments.is_empty() {
             self.assignments.remove(experiment_name);
         }

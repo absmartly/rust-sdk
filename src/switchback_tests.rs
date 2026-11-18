@@ -182,6 +182,15 @@ fn every_cycle_covers_every_arm_exactly_once() {
 }
 
 #[test]
+fn swap_index_clamps_a_probability_of_one() {
+    for i in [1usize, 2, 9] {
+        assert_eq!(swap_index(0, i), 0);
+        assert_eq!(swap_index(u32::MAX, i), i);
+        assert_eq!(swap_index(u32::MAX - 1, i), i);
+    }
+}
+
+#[test]
 fn rejects_fewer_than_two_arms() {
     assert_eq!(assign_switchback("u", 0, 0, 1), None);
     assert_eq!(assign_switchback("u", 0, 0, 0), None);
