@@ -336,7 +336,7 @@ let mut context = client.create_context(units, Some(options)).await?;
 
 | Event      | When                                               | Data                                   |
 | ---------- | -------------------------------------------------- | -------------------------------------- |
-| `error`    | Data load, `publish()` or `refresh()` fails        | `{"message": "<error>"}`               |
+| `error`    | Data load, `publish()`, `refresh()` or `refresh_with()` fails, or `publish()` discards a failed context's events | `{"message": "<error>"}` (`None` from `become_failed()`) |
 | `ready`    | Context turns ready                                | `ContextData` used to initialize       |
 | `refresh`  | `refresh()` method succeeds                        | `ContextData` used to refresh          |
 | `publish`  | `publish()` method succeeds                        | `PublishParams` sent to collector      |

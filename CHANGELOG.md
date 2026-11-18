@@ -34,9 +34,11 @@ Breaking changes are listed against the released 0.1.0.
   event, now carries `ruleOverride` (`false` unless a rule decided the
   variant), so the backend can exclude rule-assigned exposures from analysis.
 - The event logger also receives `ready` when a context becomes ready, and
-  `error` (with `{"message": ...}`) when a context fails, a publish fails or
-  `refresh_with` is called on a context that is not ready or is finalized.
-  0.1.0 emitted neither.
+  `error` with `{"message": ...}` when a context fails to load, `refresh()`
+  has no fetcher or its fetch fails, `refresh_with` is called on a context
+  that is not ready, finalizing or finalized, a publish fails, or `publish()`
+  on a failed context discards its pending events (it still returns `Ok`).
+  `become_failed()` emits `error` with no data. 0.1.0 emitted neither event.
 - The `X-Agent` header is now `absmartly-rust-sdk/<version>`. A configured
   `agent` is still sent as `User-Agent`.
 - **BREAKING (source):** `ExperimentData` gained `assignment_rules: String` and
