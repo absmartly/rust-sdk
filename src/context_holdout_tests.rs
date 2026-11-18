@@ -357,8 +357,6 @@ fn three_arm_variant_zero_holds_out_both_full_on_and_non_full_on_experiments() {
     );
 }
 
-// Arm 1 forces a non-full-on experiment to control, while a full-on one in
-// the same holdout keeps its full-on variant and its own exposure.
 #[test]
 fn three_arm_variant_one_forces_non_full_on_experiment_to_control_but_assigns_full_on_experiment_normally(
 ) {
@@ -712,8 +710,6 @@ fn refresh_with_cosmetic_holdout_edit_does_not_duplicate_covered_experiment_expo
     assert_eq!(ctx.pending(), 2);
 }
 
-// An iteration bump is a new epoch: the unit is drawn again and lands in
-// exactly one arm of it.
 #[test]
 fn refresh_with_iteration_bump_reassigns_to_exactly_one_new_arm() {
     let exp = || covered_by(experiment(1, "exp_holdout_iteration"), &[11]);
@@ -1993,8 +1989,6 @@ fn three_arm_arity_comes_from_split_without_holdout_type() {
     }
 }
 
-// Unknown scalar, object and array keys inside holdout objects, inside
-// covered experiments and at the root are ignored, across two experiments.
 #[test]
 fn unknown_fields_in_holdouts_are_ignored() {
     let mut h = holdout(11, "holdout_a", HOLDOUT_A);
@@ -2025,7 +2019,6 @@ fn unknown_fields_in_holdouts_are_ignored() {
     );
 }
 
-// A malformed holdouts list or entry degrades only itself.
 #[test]
 fn malformed_holdouts_degrade_only_themselves() {
     for holdouts in [
@@ -2098,7 +2091,7 @@ fn rule_wins_over_holdout_suppression_scenario_305() {
     );
 }
 
-// Scenario 225: adding then removing coverage re-resolves the experiment.
+// Scenario 225.
 #[test]
 fn refresh_adding_or_removing_coverage_re_resolves_experiment() {
     let h = || holdout(1, "holdout_coverage_change", HOLDOUT_A);
@@ -2270,8 +2263,6 @@ fn held_out_unit_skips_the_audience() {
     assert_eq!(ctx.pending(), 1);
 }
 
-// The not-held-out side of a same-iteration seed edit: the unit's own
-// exposure is not queued again either.
 #[test]
 fn refresh_with_seed_change_same_iteration_does_not_re_expose_not_held_out_unit() {
     let exp = || covered_by(experiment(1, "exp_seed_edit_normal"), &[11]);
@@ -2302,7 +2293,6 @@ fn coverage_change_undone_before_the_next_read_does_not_re_expose() {
 
         assert_eq!(ctx.treatment("exp_flip").unwrap(), variant);
         assert_eq!(ctx.pending(), pending, "uid {uid}");
-        // Settled on that read, so later reads skip the comparison.
         assert!(!ctx.assignments["exp_flip"]
             .coverage_stale
             .load(Ordering::Relaxed));
@@ -2433,8 +2423,6 @@ fn not_assigned_uncovered_experiment_variables_return_the_default() {
     }
 }
 
-// Coverage is only flagged for entries that had or now have holdouts, so a
-// refresh of uncovered experiments leaves the warmed read untouched.
 #[test]
 fn refresh_flags_coverage_only_for_covered_entries() {
     let exps = || {
@@ -2455,8 +2443,6 @@ fn refresh_flags_coverage_only_for_covered_entries() {
     assert!(!stale(&ctx, "exp_plain"));
 }
 
-// An overridden or rule-won held-out experiment is not a control fallback:
-// a later suppressed experiment still supplies its control value.
 #[test]
 fn overridden_or_rule_won_experiment_is_not_the_control_fallback() {
     for rule_won in [false, true] {

@@ -41,8 +41,6 @@ struct HoldoutAssignment {
     exposed: AtomicBool,
 }
 
-/// A covering holdout as it was when the assignment was built, with the
-/// unit's arm (`None` when the unit was missing).
 #[derive(Debug, Clone)]
 struct PinnedHoldout {
     data: Arc<ExperimentData>,
@@ -1050,7 +1048,6 @@ impl Context {
         };
         let mut rule_state = RuleState::default();
 
-        // Resolved for overrides too: their holdout exposures are still owed.
         let holdouts = self.resolve_holdouts(experiment_name);
         let suppressed = exp_data_opt.as_ref().is_some_and(|exp| {
             holdouts.iter().any(|h| {
@@ -1157,13 +1154,9 @@ impl Context {
             let same_run = exp_data_opt
                 .as_ref()
                 .is_some_and(|exp| Self::experiment_matches(exp, &previous.assignment));
+            // The read that got here settled the coverage flag.
             if same_run
-                && previous.holdouts.len() == holdouts.len()
-                && previous
-                    .holdouts
-                    .iter()
-                    .zip(&holdouts)
-                    .all(|(a, b)| a.data.id == b.data.id && a.data.iteration == b.data.iteration)
+                && !previous.coverage_stale.load(Ordering::Relaxed)
                 && previous.assignment.exposed
                 && previous.rule.rule_override
                 && rule_state.rule_override
