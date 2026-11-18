@@ -64,8 +64,11 @@ fn is_switchback(experiment: &ExperimentData) -> bool {
 /// draw: assignment rules, the audience and full-on still apply.
 fn switchback_schedule_servable(experiment: &ExperimentData) -> bool {
     experiment.switchback_start_at.is_some_and(|start| {
-        (0..SWITCHBACK_MAX_ANCHOR_MS).contains(&start) && start % SWITCHBACK_ANCHOR_ALIGNMENT_MS == 0
-    }) && experiment.switchback_period_ms.is_some_and(|period| period > 0)
+        (0..SWITCHBACK_MAX_ANCHOR_MS).contains(&start)
+            && start % SWITCHBACK_ANCHOR_ALIGNMENT_MS == 0
+    }) && experiment
+        .switchback_period_ms
+        .is_some_and(|period| period > 0)
         && experiment.split.len() >= 2
 }
 
@@ -157,7 +160,7 @@ struct CachedAssignment {
     /// the assignment and its exposure.
     coverage_stale: AtomicBool,
     /// Set for a switchback slot.
-    switchback: Option<SwitchbackSlot>,
+    switchback: Option<Box<SwitchbackSlot>>,
 }
 
 /// How a switchback slot was resolved.
@@ -280,6 +283,8 @@ pub struct Context {
     system_attrs: HashMap<String, Value>,
     /// Test seam for the clock; `None` reads the system time.
     clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
+    #[cfg(test)]
+    rule_evaluations: usize,
 }
 
 impl Context {
@@ -315,6 +320,8 @@ impl Context {
             publisher: None,
             system_attrs: HashMap::new(),
             clock: None,
+            #[cfg(test)]
+            rule_evaluations: 0,
         }
     }
 
@@ -1201,7 +1208,11 @@ impl Context {
     /// it when stale, and return it with where it is cached, so a cache hit
     /// copies nothing. A switchback reads the clock into `now` unless the
     /// caller already did; unit experiments never read it here.
-    fn assign(&mut self, experiment_name: &str, now: &mut Option<i64>) -> (&CachedAssignment, Slot) {
+    fn assign(
+        &mut self,
+        experiment_name: &str,
+        now: &mut Option<i64>,
+    ) -> (&CachedAssignment, Slot) {
         let slot = if self.has_switchbacks
             && self
                 .index
@@ -1482,7 +1493,8 @@ impl Context {
             return a.overridden && a.variant == variant;
         }
         if a.overridden
-            || !(cached.rule.rule_override || self.cassignments.get(experiment_name).copied() == state.custom)
+            || !(cached.rule.rule_override
+                || self.cassignments.get(experiment_name).copied() == state.custom)
         {
             return false;
         }
@@ -1518,7 +1530,10 @@ impl Context {
         };
         if rule_holds {
             let attrs_seq = self.attrs_seq;
-            let entry = self.switchbacks.get_mut(experiment_name).and_then(|e| e.slot_mut(period));
+            let entry = self
+                .switchbacks
+                .get_mut(experiment_name)
+                .and_then(|e| e.slot_mut(period));
             let entry = entry.expect("the slot was found above");
             entry.rule.rules_rev = rules_rev;
             entry.rule.variant_count = variant_count;
@@ -1612,7 +1627,9 @@ impl Context {
                     } else {
                         if !data.audience.is_empty() {
                             let attrs = self.evaluation_attributes();
-                            if let Some(matched) = self.audience_matcher.evaluate(&data.audience, &attrs) {
+                            if let Some(matched) =
+                                self.audience_matcher.evaluate(&data.audience, &attrs)
+                            {
                                 assignment.audience_mismatch = !matched;
                             }
                         }
@@ -1627,7 +1644,11 @@ impl Context {
                                 self.assigners
                                     .entry(unit_type.clone())
                                     .or_insert_with(|| VariantAssigner::new(&hash))
-                                    .assign(&data.traffic_split, data.traffic_seed_hi, data.traffic_seed_lo)
+                                    .assign(
+                                        &data.traffic_split,
+                                        data.traffic_seed_hi,
+                                        data.traffic_seed_lo,
+                                    )
                                     == 1
                             });
                             if !eligible {
@@ -1637,9 +1658,13 @@ impl Context {
                                 assignment.variant = custom;
                                 assignment.custom = true;
                             } else {
-                                assignment.variant =
-                                    switchback::assign_switchback(cluster_key, period, seed, data.split.len())
-                                        .map_or(0, |v| v as i32);
+                                assignment.variant = switchback::assign_switchback(
+                                    cluster_key,
+                                    period,
+                                    seed,
+                                    data.split.len(),
+                                )
+                                .map_or(0, |v| v as i32);
                             }
                         } else {
                             // Before the anchor or an unservable schedule: no
@@ -1690,11 +1715,11 @@ impl Context {
             CachedAssignment {
                 assignment,
                 rule: rule_state,
-                switchback: Some(SwitchbackSlot {
+                switchback: Some(Box::new(SwitchbackSlot {
                     serving,
                     silent,
                     custom,
-                }),
+                })),
                 ..Default::default()
             },
         );
@@ -1834,7 +1859,8 @@ impl Context {
         };
         let first = self.exposures.len();
         let silent = cached.switchback.as_ref().is_some_and(|s| s.silent);
-        if !silent && (!cached.suppressed || cached.assignment.overridden || cached.rule.rule_override)
+        if !silent
+            && (!cached.suppressed || cached.assignment.overridden || cached.rule.rule_override)
         {
             let a = &cached.assignment;
             self.exposures.push(Exposure {
@@ -1911,6 +1937,10 @@ impl Context {
         let (full_on_variant, seed_hi, seed_lo) =
             (exp.data.full_on_variant, exp.data.seed_hi, exp.data.seed_lo);
 
+        #[cfg(test)]
+        {
+            self.rule_evaluations += 1;
+        }
         let attrs = self.evaluation_attributes();
         let action =
             self.audience_matcher
@@ -2080,6 +2110,10 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 #[path = "context_holdout_tests.rs"]
 mod holdout_tests;
+
+#[cfg(test)]
+#[path = "context_switchback_tests.rs"]
+mod switchback_tests;
 
 #[cfg(test)]
 mod tests {

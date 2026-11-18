@@ -131,3 +131,34 @@ fn warmed_reads_of_covered_experiments_do_not_allocate() {
         assert_eq!(n, 0, "uid {uid}");
     }
 }
+
+#[test]
+fn warmed_reads_of_switchbacks_do_not_allocate() {
+    let data: ContextData = serde_json::from_value(json!({"experiments": [{
+        "id": 1, "name": "sb", "unitType": "store_id", "iteration": 1,
+        "trafficSplit": [0.0, 1.0], "split": [0.5, 0.5], "seedHi": 3, "seedLo": 4,
+        "variants": [{"config": "{\"k\":0}"}, {"config": "{\"k\":1}"}],
+        "randomizationType": "switchback",
+        "switchbackClusters": {"store_id": "city"},
+        "switchbackStartAt": 1_704_067_200_000i64,
+        "switchbackPeriodMs": 1_440_000_000_000i64
+    }, {
+        "id": 2, "name": "unit", "unitType": "store_id", "iteration": 1,
+        "trafficSplit": [0.0, 1.0], "split": [0.5, 0.5], "seedHi": 3, "seedLo": 4,
+        "variants": [{"config": null}, {"config": null}]
+    }]}))
+    .unwrap();
+    let mut ctx = Context::new(data);
+    ctx.set_unit("store_id", "s1").unwrap();
+    ctx.set_attribute("city", "Lisboa").unwrap();
+    let variant = ctx.treatment("sb").unwrap();
+    let unit = ctx.treatment("unit").unwrap();
+    let n = allocations_during(|| {
+        for _ in 0..100 {
+            assert_eq!(ctx.peek("sb").unwrap(), variant);
+            assert_eq!(ctx.treatment("sb").unwrap(), variant);
+            assert_eq!(ctx.treatment("unit").unwrap(), unit);
+        }
+    });
+    assert_eq!(n, 0);
+}

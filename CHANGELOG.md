@@ -28,9 +28,26 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   experiments only; the number of arms comes from the holdout's `split`.
   `set_override()` and a matching assignment rule win over a holdout.
   Payloads without holdouts assign and publish exactly as before.
+- Switchback experiments, as in java-sdk (`SWITCHBACK.md`): an experiment
+  with `randomizationType: "switchback"` is served per cluster and period.
+  The first unit, in `switchbackClusters` order, whose attribute path gives a
+  value serves it, and that raw value (a non-empty string, or an integer as
+  its decimal text; never a float such as `3.0`) is the cluster key. The
+  variant is the platform's balanced-block draw for the period, pinned by its
+  golden vectors. Ineligible clusters, the time before `switchbackStartAt` and
+  unservable schedules give variant 0 with no exposure. Overrides, assignment
+  rules, strict audiences, full-on, traffic and custom assignments keep their
+  unit-experiment exposure flags; holdouts never apply to a switchback. Each
+  period is exposed once, stamped with the time that chose it. Payloads
+  without switchbacks assign and publish exactly as before.
 
 ### Changed
 
+- **Switchback experiments are assigned differently.** Before 0.2.0 the SDK
+  ignored the switchback fields and served such an experiment a sticky unit
+  assignment on its `unitType`, which did not follow the schedule. It now
+  serves the cluster's schedule (see *Added*), so units in a running
+  switchback can change variant and are exposed once per period.
 - Audiences and rule conditions always see the client's `application` and
   `environment`. Only non-empty values are used, and a user attribute with
   the same name overrides them. They are not added to the publish payload,
@@ -50,7 +67,13 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   and `rule_override: false`. `ContextData` gained `holdouts` and
   `ExperimentData` gained `holdout_ids` and `holdout_type` the same way
   (`holdouts: vec![]`, `holdout_ids: vec![]`, `holdout_type: None`);
-  exhaustive destructuring patterns need `..`.
+  exhaustive destructuring patterns need `..`. `ExperimentData` also gained
+  the switchback fields (`randomization_type`, `switchback_clusters`,
+  `switchback_cluster_values`, `switchback_start_at`, `switchback_period_ms`,
+  `switchback_carryover_duration_ms`, `switchback_burn_in_duration_ms`,
+  `switchback_burn_out_duration_ms`, `switchback_design_type`,
+  `switchback_estimand`), all `Option`s that default to `None`, and now
+  implements `Default`, so a literal can end with `..Default::default()`.
   `Assignment` is unchanged.
 - **BREAKING:** the crate is imported as `absmartly`, and the client types
   were renamed. `ABsmartly` became `Client`, `ABsmartlyBuilder` became

@@ -29,7 +29,12 @@ fn sha1_hex(data: &[u8]) -> String {
     for chunk in message.chunks(64) {
         let mut w = [0u32; 80];
         for i in 0..16 {
-            w[i] = u32::from_be_bytes([chunk[4 * i], chunk[4 * i + 1], chunk[4 * i + 2], chunk[4 * i + 3]]);
+            w[i] = u32::from_be_bytes([
+                chunk[4 * i],
+                chunk[4 * i + 1],
+                chunk[4 * i + 2],
+                chunk[4 * i + 3],
+            ]);
         }
         for i in 16..80 {
             w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
@@ -105,11 +110,19 @@ fn assign_switchback_matches_every_golden_vector() {
         let seed = exact_i64(&c["seed"]);
         let arm_count = c["armCount"].as_u64().unwrap() as usize;
         arm_counts.insert(arm_count);
-        if [period_index, seed].iter().any(|v| *v == i64::MIN || *v == i64::MAX) {
+        if [period_index, seed]
+            .iter()
+            .any(|v| *v == i64::MIN || *v == i64::MAX)
+        {
             boundary_cases += 1;
         }
         assert_eq!(
-            assign_switchback(&cluster_unit(&c["clusterUnit"]), period_index, seed, arm_count),
+            assign_switchback(
+                &cluster_unit(&c["clusterUnit"]),
+                period_index,
+                seed,
+                arm_count
+            ),
             Some(c["expectedVariant"].as_u64().unwrap() as usize),
             "{}",
             c
@@ -121,7 +134,10 @@ fn assign_switchback_matches_every_golden_vector() {
 
 #[test]
 fn fisher_yates_permutation_matches_every_golden_vector() {
-    let cases = vectors()["fisherYatesPermutation"].as_array().unwrap().clone();
+    let cases = vectors()["fisherYatesPermutation"]
+        .as_array()
+        .unwrap()
+        .clone();
     assert_eq!(cases.len(), 504);
     for c in &cases {
         let arm_count = c["armCount"].as_u64().unwrap() as usize;
@@ -136,7 +152,12 @@ fn fisher_yates_permutation_matches_every_golden_vector() {
             exact_i64(&c["cycleIndex"]),
             exact_i64(&c["seed"]),
         );
-        assert_eq!(fisher_yates_permutation(arm_count, hash), Some(expected), "{}", c);
+        assert_eq!(
+            fisher_yates_permutation(arm_count, hash),
+            Some(expected),
+            "{}",
+            c
+        );
     }
 }
 
@@ -146,9 +167,13 @@ fn every_cycle_covers_every_arm_exactly_once() {
         for cycle in -3i64..20 {
             let mut seen = vec![false; arm_count];
             for slot in 0..arm_count as i64 {
-                let variant =
-                    assign_switchback("store_42", cycle * arm_count as i64 + slot, 0x1234_5678_9abc, arm_count)
-                        .unwrap();
+                let variant = assign_switchback(
+                    "store_42",
+                    cycle * arm_count as i64 + slot,
+                    0x1234_5678_9abc,
+                    arm_count,
+                )
+                .unwrap();
                 assert!(!seen[variant], "arm repeated within a cycle");
                 seen[variant] = true;
             }
@@ -168,7 +193,10 @@ fn rejects_fewer_than_two_arms() {
 fn floor_div_and_mod_at_the_i64_bounds() {
     // The period index is floor-divided by the arm count, so a negative
     // index lands in the previous cycle at the slot floorMod gives.
-    assert_eq!(assign_switchback("market_1", -1, 0, 2), assign_switchback("market_1", -1, 0, 2));
+    assert_eq!(
+        assign_switchback("market_1", -1, 0, 2),
+        assign_switchback("market_1", -1, 0, 2)
+    );
     for (period, arms, cycle, slot) in [
         (0i64, 3i64, 0i64, 0i64),
         (2, 3, 0, 2),
@@ -179,7 +207,8 @@ fn floor_div_and_mod_at_the_i64_bounds() {
         (i64::MIN, 3, i64::MIN.div_euclid(3), 1),
         (i64::MAX, 10, i64::MAX / 10, 7),
     ] {
-        let permutation = fisher_yates_permutation(arms as usize, base_hash("k", cycle, 5)).unwrap();
+        let permutation =
+            fisher_yates_permutation(arms as usize, base_hash("k", cycle, 5)).unwrap();
         assert_eq!(
             assign_switchback("k", period, 5, arms as usize),
             Some(permutation[slot as usize]),
@@ -211,11 +240,15 @@ fn matches_every_path_case() {
 fn quoted_segments_are_literal_keys() {
     let attributes = json!({"geo": {"0": "zero", "a/b": "slash"}});
     assert_eq!(
-        AttributePath::parse("geo/'0'").unwrap().resolve(&attributes),
+        AttributePath::parse("geo/'0'")
+            .unwrap()
+            .resolve(&attributes),
         Some(&json!("zero"))
     );
     assert_eq!(
-        AttributePath::parse("geo/\"a/b\"").unwrap().resolve(&attributes),
+        AttributePath::parse("geo/\"a/b\"")
+            .unwrap()
+            .resolve(&attributes),
         Some(&json!("slash"))
     );
 }
@@ -244,7 +277,9 @@ fn rejects_malformed_paths() {
 fn separators_are_collapsed() {
     let attributes = json!({"geo": {"city": "Porto"}});
     assert_eq!(
-        AttributePath::parse("/geo//city/").unwrap().resolve(&attributes),
+        AttributePath::parse("/geo//city/")
+            .unwrap()
+            .resolve(&attributes),
         Some(&json!("Porto"))
     );
     assert_eq!(
@@ -255,7 +290,16 @@ fn separators_are_collapsed() {
 
 #[test]
 fn rejects_unsupported_paths() {
-    for path in ["", "/", "//", "0/city", "items/0", "items/0/1/city", "items/-1/city", "'"] {
+    for path in [
+        "",
+        "/",
+        "//",
+        "0/city",
+        "items/0",
+        "items/0/1/city",
+        "items/-1/city",
+        "'",
+    ] {
         assert_eq!(AttributePath::parse(path), None, "{}", path);
     }
 }
@@ -268,10 +312,17 @@ fn index_segments_read_only_arrays_and_key_segments_read_only_objects() {
         "name": "scalar"
     });
     for path in ["geo/0/city", "items/1/city", "name/x", "missing/x"] {
-        assert_eq!(AttributePath::parse(path).unwrap().resolve(&attributes), None, "{}", path);
+        assert_eq!(
+            AttributePath::parse(path).unwrap().resolve(&attributes),
+            None,
+            "{}",
+            path
+        );
     }
     assert_eq!(
-        AttributePath::parse("items/-0/city").unwrap().resolve(&attributes),
+        AttributePath::parse("items/-0/city")
+            .unwrap()
+            .resolve(&attributes),
         Some(&json!("Lisbon"))
     );
 }
@@ -280,10 +331,16 @@ fn index_segments_read_only_arrays_and_key_segments_read_only_objects() {
 fn resolve_attribute_reads_below_the_root_key() {
     let path = AttributePath::parse("geo/city").unwrap();
     assert_eq!(path.root_key(), "geo");
-    assert_eq!(path.resolve_attribute(&json!({"city": "Porto"})), Some(&json!("Porto")));
+    assert_eq!(
+        path.resolve_attribute(&json!({"city": "Porto"})),
+        Some(&json!("Porto"))
+    );
     assert_eq!(path.resolve_attribute(&json!("Porto")), None);
     let root = AttributePath::parse("'geo'").unwrap();
-    assert_eq!(root.resolve_attribute(&json!("Porto")), Some(&json!("Porto")));
+    assert_eq!(
+        root.resolve_attribute(&json!("Porto")),
+        Some(&json!("Porto"))
+    );
 }
 
 #[test]
@@ -293,7 +350,19 @@ fn try_parse_int_follows_guava() {
     assert_eq!(try_parse_int("007"), Some(7));
     assert_eq!(try_parse_int("2147483647"), Some(i32::MAX));
     assert_eq!(try_parse_int("-2147483648"), Some(i32::MIN));
-    for s in ["", "-", "+1", "1a", " 1", "2147483648", "-2147483649", "99999999999999999999", "\u{660}", "1.0", "--1"] {
+    for s in [
+        "",
+        "-",
+        "+1",
+        "1a",
+        " 1",
+        "2147483648",
+        "-2147483649",
+        "99999999999999999999",
+        "\u{660}",
+        "1.0",
+        "--1",
+    ] {
         assert_eq!(try_parse_int(s), None, "{}", s);
     }
 }
@@ -338,7 +407,12 @@ fn sources_of(pairs: &[(&str, &str)]) -> Vec<(String, AttributePath)> {
 }
 
 /// Serving over context `units` reading `attributes`.
-fn serve(sources: &[(String, AttributePath)], allowed: Option<&[String]>, units: &[&str], attributes: &Value) -> Serving {
+fn serve(
+    sources: &[(String, AttributePath)],
+    allowed: Option<&[String]>,
+    units: &[&str],
+    attributes: &Value,
+) -> Serving {
     resolve_serving(
         sources,
         allowed,
@@ -385,22 +459,48 @@ fn serving_skips_units_without_a_value_and_flags_disagreement() {
         eligible("device_id", "Porto")
     );
     assert_eq!(
-        serve(&sources, None, &both, &json!({"store_city": "Lisboa", "geo": {"city": "Porto"}})),
+        serve(
+            &sources,
+            None,
+            &both,
+            &json!({"store_city": "Lisboa", "geo": {"city": "Porto"}})
+        ),
         ineligible("store_id")
     );
-    assert_eq!(serve(&sources, None, &both, &json!({})), ineligible("store_id"));
     assert_eq!(
-        serve(&sources, None, &["device_id"], &json!({"store_city": "Lisboa", "geo": {"city": "Porto"}})),
+        serve(&sources, None, &both, &json!({})),
+        ineligible("store_id")
+    );
+    assert_eq!(
+        serve(
+            &sources,
+            None,
+            &["device_id"],
+            &json!({"store_city": "Lisboa", "geo": {"city": "Porto"}})
+        ),
         eligible("device_id", "Porto")
     );
-    assert_eq!(serve(&sources, None, &["user_id"], &json!({"store_city": "x"})), Serving::Absent);
+    assert_eq!(
+        serve(&sources, None, &["user_id"], &json!({"store_city": "x"})),
+        Serving::Absent
+    );
     // 42 and "42" agree; "042" does not.
     assert_eq!(
-        serve(&sources, None, &both, &json!({"store_city": 42, "geo": {"city": "42"}})),
+        serve(
+            &sources,
+            None,
+            &both,
+            &json!({"store_city": 42, "geo": {"city": "42"}})
+        ),
         eligible("store_id", "42")
     );
     assert_eq!(
-        serve(&sources, None, &both, &json!({"store_city": 42, "geo": {"city": "042"}})),
+        serve(
+            &sources,
+            None,
+            &both,
+            &json!({"store_city": 42, "geo": {"city": "042"}})
+        ),
         ineligible("store_id")
     );
 }
@@ -411,14 +511,25 @@ fn allow_list_filters_the_cluster_key() {
     let both = ["store_id", "device_id"];
     let lisboa = json!({"store_city": "Lisboa"});
     let list = |values: &[&str]| values.iter().map(|v| v.to_string()).collect::<Vec<_>>();
-    assert_eq!(serve(&sources, Some(&list(&["Porto", "Faro"])), &both, &lisboa), ineligible("store_id"));
+    assert_eq!(
+        serve(&sources, Some(&list(&["Porto", "Faro"])), &both, &lisboa),
+        ineligible("store_id")
+    );
     assert_eq!(
         serve(&sources, Some(&list(&["Porto", "Lisboa"])), &both, &lisboa),
         eligible("store_id", "Lisboa")
     );
-    assert_eq!(serve(&sources, Some(&[]), &both, &lisboa), eligible("store_id", "Lisboa"));
     assert_eq!(
-        serve(&sources, Some(&list(&["42"])), &both, &json!({"store_city": 42})),
+        serve(&sources, Some(&[]), &both, &lisboa),
+        eligible("store_id", "Lisboa")
+    );
+    assert_eq!(
+        serve(
+            &sources,
+            Some(&list(&["42"])),
+            &both,
+            &json!({"store_city": 42})
+        ),
         eligible("store_id", "42")
     );
     // A filtered first value is not replaced by a later allowed one.

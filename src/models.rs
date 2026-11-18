@@ -171,7 +171,10 @@ where
             f.write_str("a JSON object of unit type names to attribute paths")
         }
 
-        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
             let mut clusters: Vec<(String, String)> = Vec::new();
             let mut readable = true;
             while let Some((unit_type, path)) = map.next_entry::<String, serde_json::Value>()? {
@@ -187,7 +190,10 @@ where
             Ok(Some(if readable { clusters } else { Vec::new() }))
         }
 
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
             while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
             Ok(None)
         }

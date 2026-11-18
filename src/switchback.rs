@@ -26,7 +26,8 @@ pub fn assign_switchback(
     let arms = i64::try_from(arm_count).ok().filter(|&n| n >= 2)?;
     let cycle_index = period_index.div_euclid(arms);
     let cycle_slot = period_index.rem_euclid(arms) as usize;
-    let permutation = fisher_yates_permutation(arm_count, base_hash(cluster_key, cycle_index, seed))?;
+    let permutation =
+        fisher_yates_permutation(arm_count, base_hash(cluster_key, cycle_index, seed))?;
     Some(permutation[cycle_slot])
 }
 
@@ -64,7 +65,7 @@ pub fn fisher_yates_permutation(arm_count: usize, base_hash: u32) -> Option<Vec<
 /// (`3.0` included), boolean, object, array, empty string and null gives
 /// none. serde_json reads `-0` and integers beyond the `u64` range as
 /// floating-point numbers, so they give none too.
-pub fn cluster_key(value: &Value) -> Option<String> {
+pub(crate) fn cluster_key(value: &Value) -> Option<String> {
     match value {
         Value::String(s) if !s.is_empty() => Some(s.clone()),
         Value::Number(n) => {
@@ -91,14 +92,14 @@ enum Segment {
 /// array. Any `.` (quoted or not) or an unterminated quote makes the path
 /// malformed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttributePath {
+pub(crate) struct AttributePath {
     segments: Vec<Segment>,
 }
 
 impl AttributePath {
     /// The path, or `None` when it is malformed, empty, or has an array
     /// index that is negative, first, last, or right after another index.
-    pub fn parse(path: &str) -> Option<Self> {
+    pub(crate) fn parse(path: &str) -> Option<Self> {
         if path.contains('.') {
             return None;
         }
@@ -127,7 +128,11 @@ impl AttributePath {
         let n = segments.len();
         for (i, segment) in segments.iter().enumerate() {
             if let Segment::Index(index) = segment {
-                if *index < 0 || i == 0 || i == n - 1 || matches!(segments[i - 1], Segment::Index(_)) {
+                if *index < 0
+                    || i == 0
+                    || i == n - 1
+                    || matches!(segments[i - 1], Segment::Index(_))
+                {
                     return None;
                 }
             }
@@ -139,7 +144,7 @@ impl AttributePath {
     }
 
     /// The attribute name the path starts at.
-    pub fn root_key(&self) -> &str {
+    pub(crate) fn root_key(&self) -> &str {
         match &self.segments[0] {
             Segment::Key(key) => key,
             Segment::Index(_) => unreachable!("a parsed path starts at a key"),
@@ -148,12 +153,13 @@ impl AttributePath {
 
     /// The value below [`AttributePath::root_key`] in the attribute value
     /// `root`, or `None` when the path does not lead to one.
-    pub fn resolve_attribute<'a>(&self, root: &'a Value) -> Option<&'a Value> {
+    pub(crate) fn resolve_attribute<'a>(&self, root: &'a Value) -> Option<&'a Value> {
         self.resolve_from(root, 1)
     }
 
     /// The value at the whole path in an object of attributes.
-    pub fn resolve<'a>(&self, attributes: &'a Value) -> Option<&'a Value> {
+    #[cfg(test)]
+    pub(crate) fn resolve<'a>(&self, attributes: &'a Value) -> Option<&'a Value> {
         self.resolve_from(attributes, 0)
     }
 
@@ -183,7 +189,9 @@ fn try_parse_int(s: &str) -> Option<i32> {
 
 /// A switchback's sources in declared order, or `None` when the cluster map
 /// is missing, empty or has a path that is not supported (the legacy path).
-pub(crate) fn sources(clusters: Option<&[(String, String)]>) -> Option<Vec<(String, AttributePath)>> {
+pub(crate) fn sources(
+    clusters: Option<&[(String, String)]>,
+) -> Option<Vec<(String, AttributePath)>> {
     let clusters = clusters.filter(|c| !c.is_empty())?;
     clusters
         .iter()
@@ -200,7 +208,10 @@ pub(crate) enum Serving {
     /// No value, units that disagree, or a value outside the allow-list:
     /// control under the first linked unit, with no exposure.
     Ineligible { unit_type: String },
-    Eligible { unit_type: String, cluster_key: String },
+    Eligible {
+        unit_type: String,
+        cluster_key: String,
+    },
 }
 
 /// Walk the sources in declared order. For each one with a context unit,
@@ -234,7 +245,8 @@ pub(crate) fn resolve_serving(
     };
     match serving {
         Some((unit_type, cluster_key))
-            if !disagreement && allowed.is_none_or(|a| a.is_empty() || a.contains(&cluster_key)) =>
+            if !disagreement
+                && allowed.is_none_or(|a| a.is_empty() || a.contains(&cluster_key)) =>
         {
             Serving::Eligible {
                 unit_type: unit_type.to_string(),
