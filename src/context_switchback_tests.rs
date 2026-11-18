@@ -1104,28 +1104,23 @@ fn strict_mismatched_switchback_gives_way_on_a_shared_variable_key() {
     assert_eq!(ctx.pending(), 0);
     assert_eq!(ctx.variable_value("sb.arm", -1).unwrap(), json!(11));
     let exposures = queued(&mut ctx);
-    // Like every experiment it walks past, the mismatched switchback queues
-    // its own (recorded) strict-mismatch exposure, as unit experiments do in
-    // this SDK and in javascript-sdk.
+    // Only the experiment that supplied the value is exposed, as in java-sdk.
     assert_eq!(
         exposures,
-        vec![
-            strict_mismatch_exposure(ANCHOR + HOUR + 3),
-            seen(
-                2,
-                "exp_unit",
-                UNIT_TYPE,
-                1,
-                ANCHOR + HOUR + 3,
-                true,
-                true,
-                false,
-                true,
-                false,
-                false,
-                false
-            ),
-        ]
+        vec![seen(
+            2,
+            "exp_unit",
+            UNIT_TYPE,
+            1,
+            ANCHOR + HOUR + 3,
+            true,
+            true,
+            false,
+            true,
+            false,
+            false,
+            false
+        ),]
     );
 }
 
@@ -3743,8 +3738,9 @@ fn unit_only_payloads_skip_the_switchback_lookup() {
     assert_eq!(ctx.switchback_lookups, 1);
 }
 
-// A variable lookup reads the clock once, so every switchback it exposes is
-// stamped with the reading that chose its period.
+// A variable lookup reads the clock once: the switchback it walks past (not
+// exposed, as in java-sdk) and the one that supplies the value share the
+// reading, so the exposure is stamped with the reading that chose its period.
 #[test]
 fn variable_lookup_reads_the_clock_once_across_switchbacks() {
     let mut first = switchback(1, "exp_a", 2, HOUR);
@@ -3761,30 +3757,14 @@ fn variable_lookup_reads_the_clock_once_across_switchbacks() {
     );
     assert_eq!(
         queued(&mut ctx),
-        vec![
-            seen(
-                1,
-                "exp_a",
-                UNIT_TYPE,
-                0,
-                ANCHOR + HOUR - 1,
-                false,
-                true,
-                false,
-                false,
-                false,
-                true,
-                false
-            ),
-            exposure(
-                2,
-                "exp_b",
-                EXPECTED_2_ARMS[0],
-                ANCHOR + HOUR - 1,
-                true,
-                true
-            ),
-        ]
+        vec![exposure(
+            2,
+            "exp_b",
+            EXPECTED_2_ARMS[0],
+            ANCHOR + HOUR - 1,
+            true,
+            true
+        ),]
     );
 }
 

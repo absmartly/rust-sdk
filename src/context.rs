@@ -903,7 +903,10 @@ impl Context {
             {
                 suppressed_fallback = Some(variables.get(key).cloned());
             }
-            if expose && !a.exposed {
+            // A switchback is exposed only when it supplies the value, as in
+            // java-sdk; a unit experiment walked past is exposed as before.
+            let walked_past_switchback = value.is_none() && matches!(slot, Slot::Switchback { .. });
+            if expose && !a.exposed && !walked_past_switchback {
                 if let Some(entry) = self.cached_mut(&exp_name, slot) {
                     entry.assignment.exposed = true;
                 }
