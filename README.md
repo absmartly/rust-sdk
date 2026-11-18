@@ -336,7 +336,7 @@ let mut context = client.create_context(units, Some(options)).await?;
 
 | Event      | When                                               | Data                                   |
 | ---------- | -------------------------------------------------- | -------------------------------------- |
-| `error`    | Data load fails; the publisher returns an error from `publish()`; `refresh()` has no fetcher or its fetch fails; `refresh_with()` is called on a context that is not ready, finalizing or finalized; or `publish()` discards a failed context's events | `{"message": "<error>"}` (`None` from `become_failed()`) |
+| `error`    | Data load fails; the publisher returns an error from `publish()`, `finalize()` or `close()`; `refresh()` has no fetcher or its fetch fails; `refresh_with()` is called on a context that is not ready, finalizing or finalized; or `publish()`, `finalize()` or `close()` discards a failed context's events | `{"message": "<error>"}` (`None` from `become_failed()`) |
 | `ready`    | Context turns ready                                | `ContextData` used to initialize       |
 | `refresh`  | `refresh()` method succeeds                        | `ContextData` used to refresh          |
 | `publish`  | `publish()` method succeeds                        | `PublishParams` sent to collector      |
