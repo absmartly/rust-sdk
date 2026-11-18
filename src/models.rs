@@ -114,6 +114,7 @@ fn holdout_from_value(item: &serde_json::Value) -> Option<ExperimentData> {
         assignment_rules: String::new(),
         holdout_ids: Vec::new(),
         holdout_type: string("holdoutType"),
+        ..Default::default()
     })
 }
 
@@ -139,6 +140,137 @@ where
     })
 }
 
+/// An integral number (`3600000` or `3600000.0`) within the `i64` range;
+/// anything else reads as `None`.
+fn deserialize_lenient_i64<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(integral(&serde_json::Value::deserialize(deserializer)?))
+}
+
+/// `switchbackClusters` keeps the JSON object's key order, which decides the
+/// serving unit. It is read entry by entry rather than through a
+/// `serde_json::Value`, whose map is sorted unless serde_json's
+/// `preserve_order` feature is on. A repeated key keeps its first position
+/// and its last path, as a `LinkedHashMap` does. A path that is not a
+/// string makes the whole map unreadable, which (like an empty map) takes the
+/// legacy path, so it reads as an empty map; a non-object reads as `None`.
+fn deserialize_switchback_clusters<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<(String, String)>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct ClustersVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for ClustersVisitor {
+        type Value = Option<Vec<(String, String)>>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a JSON object of unit type names to attribute paths")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut clusters: Vec<(String, String)> = Vec::new();
+            let mut readable = true;
+            while let Some((unit_type, path)) = map.next_entry::<String, serde_json::Value>()? {
+                let serde_json::Value::String(path) = path else {
+                    readable = false;
+                    continue;
+                };
+                match clusters.iter_mut().find(|(t, _)| *t == unit_type) {
+                    Some(entry) => entry.1 = path,
+                    None => clusters.push((unit_type, path)),
+                }
+            }
+            Ok(Some(if readable { clusters } else { Vec::new() }))
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(None)
+        }
+
+        fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Self::Value, D2::Error> {
+            d.deserialize_any(self)
+        }
+    }
+
+    deserializer.deserialize_any(ClustersVisitor)
+}
+
+fn serialize_switchback_clusters<S>(
+    clusters: &Option<Vec<(String, String)>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+    match clusters {
+        None => serializer.serialize_none(),
+        Some(clusters) => {
+            let mut map = serializer.serialize_map(Some(clusters.len()))?;
+            for (unit_type, path) in clusters {
+                map.serialize_entry(unit_type, path)?;
+            }
+            map.end()
+        }
+    }
+}
+
+/// `switchbackClusterValues` is a list of strings. Numbers and booleans are
+/// kept as their JSON text, as Jackson coerces them into a `String[]`;
+/// `null`, objects and arrays are skipped. A non-array reads as `None`.
+fn deserialize_cluster_values<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Array(items) => Some(
+            items
+                .into_iter()
+                .filter_map(|item| match item {
+                    serde_json::Value::String(s) => Some(s),
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    serde_json::Value::Bool(b) => Some(b.to_string()),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        _ => None,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextData {
@@ -157,7 +289,7 @@ pub struct ContextData {
     pub holdouts: Vec<ExperimentData>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExperimentData {
     pub id: i64,
@@ -214,6 +346,83 @@ pub struct ExperimentData {
         skip_serializing_if = "Option::is_none"
     )]
     pub holdout_type: Option<String>,
+    /// `"switchback"` makes this a switchback experiment; `"unit"` or
+    /// anything else (or absent) is a unit experiment.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lenient_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub randomization_type: Option<String>,
+    /// A switchback's sources: unit type name and the attribute path holding
+    /// its cluster value, **in the served order**. The first unit (in this
+    /// order) whose path gives a value serves the experiment, so the order is
+    /// kept exactly as received.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_switchback_clusters",
+        serialize_with = "serialize_switchback_clusters",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub switchback_clusters: Option<Vec<(String, String)>>,
+    /// The cluster values a switchback serves; `None` or empty serves every
+    /// value.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_cluster_values",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub switchback_cluster_values: Option<Vec<String>>,
+    /// The switchback's anchor, in epoch milliseconds. It must be hour
+    /// aligned and before year 10000, or the schedule is unservable.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lenient_i64",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub switchback_start_at: Option<i64>,
+    /// The switchback's period length in milliseconds.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lenient_i64",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub switchback_period_ms: Option<i64>,
+    /// Analysis-only; carried but not used for assignment.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lenient_i64",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub switchback_carryover_duration_ms: Option<i64>,
+    /// Analysis-only; carried but not used for assignment.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lenient_i64",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub switchback_burn_in_duration_ms: Option<i64>,
+    /// Analysis-only; carried but not used for assignment.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lenient_i64",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub switchback_burn_out_duration_ms: Option<i64>,
+    /// The switchback design, for example `"balanced_block"`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lenient_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub switchback_design_type: Option<String>,
+    /// Analysis-only; carried but not used for assignment.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lenient_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub switchback_estimand: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

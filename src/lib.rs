@@ -7,6 +7,7 @@ pub mod md5;
 pub mod models;
 pub mod murmur3;
 pub mod sdk;
+pub mod switchback;
 pub mod utils;
 
 pub use context::Context;
