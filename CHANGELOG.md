@@ -36,8 +36,10 @@ Breaking changes are listed against the released 0.1.0.
 - The event logger also receives `ready` when a context becomes ready, and
   `error` with `{"message": ...}` when a context fails to load, `refresh()`
   has no fetcher or its fetch fails, `refresh_with` is called on a context
-  that is not ready, finalizing or finalized, a publish fails, or `publish()`
-  on a failed context discards its pending events (it still returns `Ok`).
+  that is not ready, finalizing or finalized, the publisher returns an error,
+  or `publish()` on a failed context discards its pending events (it still
+  returns `Ok`). A `publish()` or `refresh()` rejected by the readiness check
+  returns `Err` without an event.
   `become_failed()` emits `error` with no data. 0.1.0 emitted neither event.
 - The `X-Agent` header is now `absmartly-rust-sdk/<version>`. A configured
   `agent` is still sent as `User-Agent`.
