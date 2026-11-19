@@ -9,6 +9,7 @@ use crate::assigner::VariantAssigner;
 use crate::context_publisher::ContextPublisher;
 use crate::matcher::{AudienceMatcher, RuleAction};
 use crate::models::*;
+use crate::switchback::{self, AttributePath, Serving};
 use crate::utils::{array_equals_shallow, hash_unit_value};
 
 pub type EventLogger = Box<dyn Fn(&Context, &str, Option<Value>) + Send + Sync>;
@@ -23,8 +24,87 @@ struct Experiment {
     /// `assignment_rules`, so cached assignments compare it instead of the
     /// rule text.
     rules_rev: u64,
-    /// Sorted by id and unique, as in JS.
+    /// Sorted by id and unique, as in JS. Never read for a switchback:
+    /// holdouts never apply to one.
     holdouts: Vec<Arc<ExperimentData>>,
+    /// Set when `data` is a switchback experiment.
+    switchback: Option<SwitchbackDef>,
+}
+
+/// A switchback experiment as installed.
+struct SwitchbackDef {
+    /// Kept across a data load while the switchback identity is unchanged
+    /// (see [`same_switchback_identity`]), otherwise a fresh value. Cached
+    /// slots from another generation are dropped on the next resolution.
+    generation: u64,
+    /// `switchbackClusters` in declared order with parsed paths; `None` for
+    /// a missing, empty or unreadable map (the Collector's legacy path).
+    sources: Option<Vec<(String, AttributePath)>>,
+    /// `(seedHi << 32) | seedLo`.
+    seed: i64,
+    /// Whether the schedule can be drawn at all (see
+    /// [`switchback_schedule_servable`]).
+    servable: bool,
+}
+
+const SWITCHBACK_ANCHOR_ALIGNMENT_MS: i64 = 3_600_000;
+/// 10000-01-01T00:00:00Z: the Collector's Registry serves no anchor at or
+/// after it.
+const SWITCHBACK_MAX_ANCHOR_MS: i64 = 253_402_300_800_000;
+/// Period slots kept per switchback experiment, besides the pre-start slot.
+const SWITCHBACK_RETAINED_PERIODS: usize = 2;
+
+fn is_switchback(experiment: &ExperimentData) -> bool {
+    experiment.randomization_type.as_deref() == Some("switchback")
+}
+
+/// Whether the Collector's Registry can serve the schedule: an hour-aligned
+/// anchor in `[0, 10000-01-01)` (used as served, never rounded), a period
+/// over 0 and at least two arms, one `variants` entry per arm (otherwise the
+/// draw could serve and expose an arm with no variant). An unservable
+/// schedule only replaces the draw: assignment rules, the audience and
+/// full-on still apply.
+fn switchback_schedule_servable(experiment: &ExperimentData) -> bool {
+    experiment.switchback_start_at.is_some_and(|start| {
+        (0..SWITCHBACK_MAX_ANCHOR_MS).contains(&start)
+            && start % SWITCHBACK_ANCHOR_ALIGNMENT_MS == 0
+    }) && experiment
+        .switchback_period_ms
+        .is_some_and(|period| period > 0)
+        && experiment.split.len() >= 2
+        && experiment.split.len() == experiment.variants.len()
+}
+
+/// `floorDiv(now - switchbackStartAt, switchbackPeriodMs)`, or `None`
+/// before the anchor, for an unservable schedule and on the legacy path.
+fn switchback_period(def: &SwitchbackDef, experiment: &ExperimentData, now: i64) -> Option<i64> {
+    if !def.servable || def.sources.is_none() {
+        return None;
+    }
+    let start = experiment.switchback_start_at?;
+    let period_ms = experiment.switchback_period_ms?;
+    // now >= start >= 0, so the difference cannot overflow and floor
+    // division is plain division.
+    (now >= start).then(|| (now - start) / period_ms)
+}
+
+/// Everything that maps clusters and periods to variants: id, iteration,
+/// the ordered cluster map, the allow-list, anchor, period length and
+/// design, plus `unitType` when either side takes the legacy path. Seed,
+/// split and the analysis-only fields are not identity.
+fn same_switchback_identity(previous: &Experiment, installed: &Experiment) -> bool {
+    let (Some(old), Some(new)) = (&previous.switchback, &installed.switchback) else {
+        return false;
+    };
+    let (a, b) = (&previous.data, &installed.data);
+    a.id == b.id
+        && a.iteration == b.iteration
+        && a.switchback_clusters == b.switchback_clusters
+        && a.switchback_cluster_values == b.switchback_cluster_values
+        && a.switchback_start_at == b.switchback_start_at
+        && a.switchback_period_ms == b.switchback_period_ms
+        && a.switchback_design_type == b.switchback_design_type
+        && ((old.sources.is_some() && new.sources.is_some()) || a.unit_type == b.unit_type)
 }
 
 /// A unit's arm in one holdout epoch, shared by every assignment that
@@ -82,6 +162,93 @@ struct CachedAssignment {
     /// next read, as in JS, so a change that a later refresh undoes keeps
     /// the assignment and its exposure.
     coverage_stale: AtomicBool,
+    /// Set for a switchback slot.
+    switchback: Option<Box<SwitchbackSlot>>,
+}
+
+/// How a switchback slot was resolved.
+#[derive(Debug)]
+struct SwitchbackSlot {
+    /// Read once per slot: a rebuild in the same period keeps it unless no
+    /// linked unit was set (`Absent`).
+    serving: Serving,
+    /// The clock reading `serving` was resolved at. The Collector resolves
+    /// the cluster again at `exposedAt`, so an exposure whose own reading
+    /// no longer gives `serving` is stamped with this one instead.
+    resolved_at: i64,
+    /// The targeting the slot was resolved under; a refresh that changes it
+    /// rebuilds the slot.
+    audience: String,
+    audience_strict: bool,
+    /// The Collector records nothing for it: no linked unit, an ineligible
+    /// cluster, or no draw (before the anchor or an unservable schedule).
+    silent: bool,
+    /// The custom assignment when the slot was resolved.
+    custom: Option<i32>,
+}
+
+/// One switchback experiment's cached slots, all from one generation.
+#[derive(Debug, Default)]
+struct SwitchbackEpoch {
+    generation: u64,
+    /// Before the anchor, an unservable schedule, or the legacy path.
+    pre_start: Option<CachedAssignment>,
+    /// By period index; at most [`SWITCHBACK_RETAINED_PERIODS`].
+    periods: Vec<(i64, CachedAssignment)>,
+}
+
+impl SwitchbackEpoch {
+    fn slot(&self, period: Option<i64>) -> Option<&CachedAssignment> {
+        match period {
+            None => self.pre_start.as_ref(),
+            Some(p) => self.periods.iter().find(|(i, _)| *i == p).map(|(_, c)| c),
+        }
+    }
+
+    fn slot_mut(&mut self, period: Option<i64>) -> Option<&mut CachedAssignment> {
+        match period {
+            None => self.pre_start.as_mut(),
+            Some(p) => self
+                .periods
+                .iter_mut()
+                .find(|(i, _)| *i == p)
+                .map(|(_, c)| c),
+        }
+    }
+
+    /// Install `slot`. A third period evicts the lowest index other than
+    /// `period`, so the slot just installed always stays; retention is by
+    /// index, not recency.
+    fn install(&mut self, period: Option<i64>, slot: CachedAssignment) {
+        let Some(p) = period else {
+            self.pre_start = Some(slot);
+            return;
+        };
+        match self.periods.iter_mut().find(|(i, _)| *i == p) {
+            Some(entry) => entry.1 = slot,
+            None => self.periods.push((p, slot)),
+        }
+        while self.periods.len() > SWITCHBACK_RETAINED_PERIODS {
+            let evicted = self
+                .periods
+                .iter()
+                .enumerate()
+                .filter(|(_, (i, _))| *i != p)
+                .min_by_key(|(_, (i, _))| *i)
+                .map(|(at, _)| at)
+                .expect("more than one period is retained");
+            self.periods.remove(evicted);
+        }
+    }
+}
+
+/// Where an experiment's current assignment is cached. Switchback slots
+/// carry the clock reading they were resolved at, which stamps their
+/// exposure.
+#[derive(Debug, Clone, Copy)]
+enum Slot {
+    Unit,
+    Switchback { period: Option<i64>, now: i64 },
 }
 
 pub type DataFetcher = Box<dyn Fn() -> Result<ContextData, String> + Send + Sync>;
@@ -117,6 +284,24 @@ pub struct Context {
     /// The client's `application` and `environment` names, seeded under
     /// user attributes when evaluating audiences and rules.
     system_attrs: HashMap<String, Value>,
+    /// Switchback slots by experiment name. Unit experiments are cached in
+    /// `assignments` only.
+    switchbacks: HashMap<String, SwitchbackEpoch>,
+    /// Source of [`SwitchbackDef::generation`].
+    switchback_generations: u64,
+    /// The installed data has a switchback experiment. Reads check it before
+    /// looking for one, so payloads without switchbacks pay nothing.
+    has_switchbacks: bool,
+    /// Test seam for the clock; `None` reads the system time.
+    clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
+    #[cfg(test)]
+    rule_evaluations: usize,
+    /// Switchback lookups made by `assign`.
+    #[cfg(test)]
+    switchback_lookups: usize,
+    /// Reads that went through the generic (switchback-aware) `assign`.
+    #[cfg(test)]
+    generic_assigns: usize,
 }
 
 impl Context {
@@ -139,6 +324,9 @@ impl Context {
             index: HashMap::new(),
             index_variables: HashMap::new(),
             holdout_assignments: HashMap::new(),
+            switchbacks: HashMap::new(),
+            switchback_generations: 0,
+            has_switchbacks: false,
             assigners: HashMap::new(),
             hashes: HashMap::new(),
             audience_matcher: AudienceMatcher::new(),
@@ -148,6 +336,20 @@ impl Context {
             data_fetcher: None,
             publisher: None,
             system_attrs: HashMap::new(),
+            clock: None,
+            #[cfg(test)]
+            rule_evaluations: 0,
+            #[cfg(test)]
+            switchback_lookups: 0,
+            #[cfg(test)]
+            generic_assigns: 0,
+        }
+    }
+
+    fn now(&self) -> i64 {
+        match &self.clock {
+            Some(clock) => clock(),
+            None => now_millis(),
         }
     }
 
@@ -265,6 +467,7 @@ impl Context {
 
     fn init(&mut self, data: ContextData) {
         self.data = data;
+        self.has_switchbacks = self.data.experiments.iter().any(is_switchback);
         let mut previous = std::mem::take(&mut self.index);
         self.index_variables.clear();
         let holdouts_by_id: HashMap<i64, Arc<ExperimentData>> = self
@@ -310,11 +513,12 @@ impl Context {
                 variables.push(parsed);
             }
 
-            let unchanged = previous
-                .remove(&experiment.name)
+            let old = previous.remove(&experiment.name);
+            let unchanged = old
+                .as_ref()
                 .filter(|old| old.data.assignment_rules == experiment.assignment_rules);
             let (rules, rules_rev) = match unchanged {
-                Some(old) => (old.rules, old.rules_rev),
+                Some(old) => (old.rules.clone(), old.rules_rev),
                 None => {
                     let rules = match self
                         .audience_matcher
@@ -342,16 +546,37 @@ impl Context {
             holdouts.sort_by_key(|holdout| holdout.id);
             holdouts.dedup_by_key(|holdout| holdout.id);
 
-            self.index.insert(
-                experiment.name.clone(),
-                Experiment {
-                    data: experiment.clone(),
-                    variables,
-                    rules,
-                    rules_rev,
-                    holdouts,
-                },
-            );
+            let switchback = is_switchback(experiment).then(|| SwitchbackDef {
+                generation: 0,
+                sources: switchback::sources(experiment.switchback_clusters.as_deref()),
+                seed: ((u64::from(experiment.seed_hi) << 32) | u64::from(experiment.seed_lo))
+                    as i64,
+                servable: switchback_schedule_servable(experiment),
+            });
+            let mut installed = Experiment {
+                data: experiment.clone(),
+                variables,
+                rules,
+                rules_rev,
+                holdouts,
+                switchback,
+            };
+            if installed.switchback.is_some() {
+                let generation = match old.as_ref() {
+                    Some(old) if same_switchback_identity(old, &installed) => {
+                        old.switchback.as_ref().map_or(0, |def| def.generation)
+                    }
+                    _ => {
+                        self.switchback_generations += 1;
+                        self.switchback_generations
+                    }
+                };
+                if let Some(def) = installed.switchback.as_mut() {
+                    def.generation = generation;
+                }
+            }
+
+            self.index.insert(experiment.name.clone(), installed);
         }
     }
 
@@ -434,6 +659,21 @@ impl Context {
                 && !a.assignment.exposed
                 && a.assignment.unit_type.as_deref() == Some(unit_type))
         });
+        // A switchback resolved before any linked unit was set is resolved
+        // again. Unless overridden it never published anything, so it goes
+        // even if exposed.
+        for epoch in self.switchbacks.values_mut() {
+            let keep = |c: &CachedAssignment| {
+                !c.switchback
+                    .as_ref()
+                    .is_some_and(|s| s.serving == Serving::Absent)
+                    || (c.assignment.overridden && c.assignment.exposed)
+            };
+            if epoch.pre_start.as_ref().is_some_and(|c| !keep(c)) {
+                epoch.pre_start = None;
+            }
+            epoch.periods.retain(|(_, c)| keep(c));
+        }
         Ok(())
     }
 
@@ -460,10 +700,11 @@ impl Context {
     pub fn set_attribute(&mut self, name: &str, value: impl Into<Value>) -> Result<(), String> {
         self.check_not_finalized()?;
 
+        let set_at = self.now();
         self.attrs.push(Attribute {
             name: name.to_string(),
             value: value.into(),
-            set_at: now_millis(),
+            set_at,
         });
         self.attrs_seq += 1;
         Ok(())
@@ -477,7 +718,7 @@ impl Context {
     {
         self.check_not_finalized()?;
 
-        let set_at = now_millis();
+        let set_at = self.now();
         for (name, value) in attrs {
             self.attrs.push(Attribute {
                 name: name.into(),
@@ -566,7 +807,10 @@ impl Context {
     /// `Err` before the context is ready and once it is finalizing or finalized.
     pub fn peek(&mut self, experiment_name: &str) -> Result<i32, String> {
         self.check_ready(true)?;
-        Ok(self.assign(experiment_name).assignment.variant)
+        if !self.has_switchbacks {
+            return Ok(self.assign_unit(experiment_name).assignment.variant);
+        }
+        Ok(self.assign(experiment_name, &mut None).0.assignment.variant)
     }
 
     /// The variant assigned to `experiment_name`; queues an exposure the first
@@ -574,14 +818,25 @@ impl Context {
     /// finalized.
     pub fn treatment(&mut self, experiment_name: &str) -> Result<i32, String> {
         self.check_ready(true)?;
-        let assignment = &self.assign(experiment_name).assignment;
-        let (variant, exposed) = (assignment.variant, assignment.exposed);
+        if !self.has_switchbacks {
+            let a = &self.assign_unit(experiment_name).assignment;
+            let (variant, exposed) = (a.variant, a.exposed);
+            if !exposed {
+                if let Some(entry) = self.assignments.get_mut(experiment_name) {
+                    entry.assignment.exposed = true;
+                }
+                self.trigger_exposures(experiment_name, Slot::Unit);
+            }
+            return Ok(variant);
+        }
+        let (cached, slot) = self.assign(experiment_name, &mut None);
+        let (variant, exposed) = (cached.assignment.variant, cached.assignment.exposed);
 
         if !exposed {
-            if let Some(entry) = self.assignments.get_mut(experiment_name) {
+            if let Some(entry) = self.cached_mut(experiment_name, slot) {
                 entry.assignment.exposed = true;
             }
-            self.trigger_exposures(experiment_name);
+            self.trigger_exposures(experiment_name, slot);
         }
 
         Ok(variant)
@@ -607,7 +862,7 @@ impl Context {
         let goal = Goal {
             name: goal_name.to_string(),
             properties: properties_map,
-            achieved_at: now_millis(),
+            achieved_at: self.now(),
         };
 
         match serde_json::to_value(&goal) {
@@ -650,8 +905,14 @@ impl Context {
     fn resolve_variable_value(&mut self, key: &str, expose: bool) -> Option<Value> {
         let experiment_names = self.index_variables.get(key)?.clone();
         let mut suppressed_fallback: Option<Option<Value>> = None;
+        // One clock reading for the whole lookup, taken only for a switchback.
+        let mut now = None;
         for exp_name in experiment_names {
-            let cached = self.assign(&exp_name);
+            let (cached, slot) = if self.has_switchbacks {
+                self.assign(&exp_name, &mut now)
+            } else {
+                (self.assign_unit(&exp_name), Slot::Unit)
+            };
             let a = &cached.assignment;
             let Some(variables) = &a.variables else {
                 continue;
@@ -668,11 +929,17 @@ impl Context {
             {
                 suppressed_fallback = Some(variables.get(key).cloned());
             }
-            if expose && !a.exposed {
-                if let Some(entry) = self.assignments.get_mut(&exp_name) {
+            // As in java-sdk, a switchback that is not assigned, overridden or
+            // rule-won (a strict audience mismatch, say) is walked past without
+            // an exposure; any other is exposed even when its variant lacks the
+            // key. A unit experiment walked past is exposed as before.
+            let walked_past_switchback = matches!(slot, Slot::Switchback { .. })
+                && !(a.assigned || a.overridden || cached.rule.rule_override);
+            if expose && !a.exposed && !walked_past_switchback {
+                if let Some(entry) = self.cached_mut(&exp_name, slot) {
                     entry.assignment.exposed = true;
                 }
-                self.trigger_exposures(&exp_name);
+                self.trigger_exposures(&exp_name, slot);
             }
 
             if value.is_some() {
@@ -980,11 +1247,62 @@ impl Context {
     }
 
     /// Make the cached assignment for `experiment_name` current, rebuilding
-    /// it when stale. Afterwards `self.assignments` always has the entry;
-    /// callers read it there, so a cache hit copies nothing.
-    fn assign(&mut self, experiment_name: &str) -> &CachedAssignment {
+    /// it when stale, and return it with where it is cached, so a cache hit
+    /// copies nothing. A switchback reads the clock into `now` unless the
+    /// caller already did; unit experiments never read it here.
+    fn assign(
+        &mut self,
+        experiment_name: &str,
+        now: &mut Option<i64>,
+    ) -> (&CachedAssignment, Slot) {
+        #[cfg(test)]
+        {
+            self.generic_assigns += 1;
+        }
+        let slot = if self.has_switchbacks && {
+            #[cfg(test)]
+            {
+                self.switchback_lookups += 1;
+            }
+            self.index
+                .get(experiment_name)
+                .is_some_and(|exp| exp.switchback.is_some())
+        } {
+            let now = *now.get_or_insert_with(|| self.now());
+            self.refresh_switchback(experiment_name, now)
+        } else {
+            self.refresh_assignment(experiment_name);
+            Slot::Unit
+        };
+        (self.cached(experiment_name, slot), slot)
+    }
+
+    /// [`Context::assign`] for a payload without switchbacks: the same
+    /// single call into `refresh_assignment` the unit path always made, so
+    /// it inlines as it did before switchbacks.
+    #[inline(always)]
+    fn assign_unit(&mut self, experiment_name: &str) -> &CachedAssignment {
         self.refresh_assignment(experiment_name);
         &self.assignments[experiment_name]
+    }
+
+    fn cached(&self, experiment_name: &str, slot: Slot) -> &CachedAssignment {
+        match slot {
+            Slot::Unit => &self.assignments[experiment_name],
+            Slot::Switchback { period, .. } => self.switchbacks[experiment_name]
+                .slot(period)
+                .expect("refresh_switchback installs the slot"),
+        }
+    }
+
+    fn cached_mut(&mut self, experiment_name: &str, slot: Slot) -> Option<&mut CachedAssignment> {
+        match slot {
+            Slot::Unit => self.assignments.get_mut(experiment_name),
+            Slot::Switchback { period, .. } => self
+                .switchbacks
+                .get_mut(experiment_name)
+                .and_then(|epoch| epoch.slot_mut(period)),
+        }
     }
 
     fn refresh_assignment(&mut self, experiment_name: &str) {
@@ -1039,6 +1357,16 @@ impl Context {
                 }
             }
         }
+        self.rebuild_assignment(experiment_name, has_custom, has_override);
+    }
+
+    /// Build the unit assignment `refresh_assignment` found stale or missing.
+    #[inline(never)]
+    fn rebuild_assignment(&mut self, experiment_name: &str, has_custom: bool, has_override: bool) {
+        // Slots of a switchback that is now a unit experiment, or gone.
+        if !self.switchbacks.is_empty() {
+            self.switchbacks.remove(experiment_name);
+        }
 
         let exp_data_opt = self.index.get(experiment_name).map(|e| e.data.clone());
 
@@ -1072,7 +1400,7 @@ impl Context {
             // assignment so a refresh that changes them can be detected.
             rule_state.rules_rev = self.index[experiment_name].rules_rev;
             rule_state.variant_count = exp_data.variants.len();
-            let rule = self.resolve_rule(experiment_name, false);
+            let rule = self.resolve_rule(experiment_name, None, false);
 
             if rule.is_none() && !suppressed && !exp_data.audience.is_empty() {
                 let attrs = self.evaluation_attributes();
@@ -1177,8 +1505,332 @@ impl Context {
                 suppressed,
                 holdouts,
                 coverage_stale: AtomicBool::new(false),
+                switchback: None,
             },
         );
+    }
+
+    /// Make the switchback slot for the period `now` falls in current,
+    /// rebuilding it when stale, as java-sdk's `getAssignment` does for a
+    /// switchback. The caller checked that `experiment_name` is one.
+    fn refresh_switchback(&mut self, experiment_name: &str, now: i64) -> Slot {
+        let exp = &self.index[experiment_name];
+        let def = exp.switchback.as_ref().expect("a switchback experiment");
+        let period = switchback_period(def, &exp.data, now);
+        let generation = def.generation;
+        let slot = Slot::Switchback { period, now };
+
+        // A new identity starts a new epoch: every slot of the old one goes,
+        // the pre-start slot included.
+        if self
+            .switchbacks
+            .get(experiment_name)
+            .is_some_and(|epoch| epoch.generation != generation)
+        {
+            self.switchbacks.remove(experiment_name);
+        }
+        if self.switchback_slot_is_current(experiment_name, period) {
+            return slot;
+        }
+        self.rebuild_switchback(experiment_name, period, now);
+        slot
+    }
+
+    fn switchback_slot_is_current(&mut self, experiment_name: &str, period: Option<i64>) -> bool {
+        let Some(cached) = self
+            .switchbacks
+            .get(experiment_name)
+            .and_then(|epoch| epoch.slot(period))
+        else {
+            return false;
+        };
+        let (Some(state), a) = (&cached.switchback, &cached.assignment) else {
+            return false;
+        };
+        if let Some(&variant) = self.overrides.get(experiment_name) {
+            return a.overridden && a.variant == variant;
+        }
+        if a.overridden
+            || !(cached.rule.rule_override
+                || self.cassignments.get(experiment_name).copied() == state.custom)
+        {
+            return false;
+        }
+        let exp = &self.index[experiment_name];
+        let data = &exp.data;
+        let same_run = data.id == a.id
+            && data.iteration == a.iteration
+            && data.full_on_variant == a.full_on_variant
+            && a.traffic_split
+                .as_ref()
+                .is_some_and(|ts| array_equals_shallow(&data.traffic_split, ts));
+        if !same_run
+            || data.audience_strict != state.audience_strict
+            || data.audience != state.audience
+            || !self.audience_matches(data, cached)
+        {
+            return false;
+        }
+        let (rules_rev, variant_count) = (exp.rules_rev, data.variants.len());
+        if cached.rule.rules_rev == rules_rev
+            && cached.rule.variant_count == variant_count
+            && self.attrs_seq <= a.attrs_seq
+        {
+            return true;
+        }
+        // Rules are consulted only for an eligible cluster.
+        let rule_holds = match &state.serving {
+            Serving::Eligible { unit_type, .. } => {
+                let expected = cached
+                    .rule
+                    .rule_override
+                    .then_some((a.variant, cached.rule.missing_unit));
+                let unit_type = unit_type.clone();
+                self.resolve_rule(experiment_name, Some(&unit_type), false) == expected
+            }
+            _ => true,
+        };
+        if rule_holds {
+            let attrs_seq = self.attrs_seq;
+            let entry = self
+                .switchbacks
+                .get_mut(experiment_name)
+                .and_then(|e| e.slot_mut(period));
+            let entry = entry.expect("the slot was found above");
+            entry.rule.rules_rev = rules_rev;
+            entry.rule.variant_count = variant_count;
+            entry.assignment.attrs_seq = attrs_seq;
+        }
+        rule_holds
+    }
+
+    /// The Collector's switchback branch (R33). Holdouts never apply. Only
+    /// the schedule draw needs a period: before the anchor or with an
+    /// unservable schedule it is a silent control, while rules, the audience
+    /// and full-on still apply.
+    fn rebuild_switchback(&mut self, experiment_name: &str, period: Option<i64>, now: i64) {
+        // A unit assignment from before the experiment became a switchback:
+        // java-sdk drops it with the epoch, so a return to the same unit
+        // experiment is exposed again.
+        if !self.assignments.is_empty() {
+            self.assignments.remove(experiment_name);
+        }
+        let exp = &self.index[experiment_name];
+        let def = exp.switchback.as_ref().expect("a switchback experiment");
+        let data = exp.data.clone();
+        let (generation, seed) = (def.generation, def.seed);
+        let rules_rev = exp.rules_rev;
+        // Read once per slot: a rebuild in the same period keeps the serving
+        // unit and cluster key, unless no linked unit was set then.
+        let previous = self
+            .switchbacks
+            .get(experiment_name)
+            .and_then(|epoch| epoch.slot(period));
+        let (serving, resolved_at) = match previous.and_then(|c| c.switchback.as_ref()) {
+            Some(state) if state.serving != Serving::Absent => {
+                (state.serving.clone(), state.resolved_at)
+            }
+            _ => (self.resolve_switchback_serving(experiment_name, now), now),
+        };
+        let fallback_unit = match &def.sources {
+            Some(sources) => Some(sources[0].0.clone()),
+            None => data.unit_type.clone(),
+        };
+        let custom = self.cassignments.get(experiment_name).copied();
+
+        let mut assignment = Assignment {
+            eligible: true,
+            ..Default::default()
+        };
+        let mut rule_state = RuleState::default();
+        let mut silent = false;
+
+        if let Some(&variant) = self.overrides.get(experiment_name) {
+            assignment.id = data.id;
+            assignment.unit_type = match &serving {
+                Serving::Eligible { unit_type, .. } | Serving::Ineligible { unit_type } => {
+                    Some(unit_type.clone())
+                }
+                Serving::Absent => fallback_unit,
+            };
+            assignment.overridden = true;
+            assignment.variant = variant;
+        } else {
+            rule_state.rules_rev = rules_rev;
+            rule_state.variant_count = data.variants.len();
+            assignment.id = data.id;
+            assignment.iteration = data.iteration;
+            assignment.traffic_split = Some(data.traffic_split.clone());
+            assignment.full_on_variant = data.full_on_variant;
+            assignment.attrs_seq = self.attrs_seq;
+            match &serving {
+                Serving::Absent => {
+                    // No linked unit: the experiment does not apply.
+                    assignment.unit_type = fallback_unit;
+                    assignment.eligible = false;
+                    silent = true;
+                }
+                Serving::Ineligible { unit_type } => {
+                    assignment.unit_type = Some(unit_type.clone());
+                    assignment.assigned = true;
+                    assignment.eligible = false;
+                    silent = true;
+                }
+                Serving::Eligible {
+                    unit_type,
+                    cluster_key,
+                } => {
+                    assignment.unit_type = Some(unit_type.clone());
+                    assignment.assigned = true;
+                    if let Some((variant, missing_unit)) =
+                        self.resolve_rule(experiment_name, Some(unit_type), false)
+                    {
+                        // Recorded like a unit experiment's rule win.
+                        assignment.assigned = false;
+                        rule_state.rule_override = true;
+                        rule_state.missing_unit = missing_unit;
+                        assignment.variant = variant;
+                    } else {
+                        if !data.audience.is_empty() {
+                            let attrs = self.evaluation_attributes();
+                            if let Some(matched) =
+                                self.audience_matcher.evaluate(&data.audience, &attrs)
+                            {
+                                assignment.audience_mismatch = !matched;
+                            }
+                        }
+                        if data.audience_strict && assignment.audience_mismatch {
+                            // Recorded like a unit experiment's strict mismatch.
+                            assignment.assigned = false;
+                        } else if data.full_on_variant != 0 {
+                            assignment.variant = data.full_on_variant as i32;
+                            assignment.full_on = true;
+                        } else if let Some(period) = period {
+                            let eligible = self.unit_hash(unit_type).is_some_and(|hash| {
+                                self.assigners
+                                    .entry(unit_type.clone())
+                                    .or_insert_with(|| VariantAssigner::new(&hash))
+                                    .assign(
+                                        &data.traffic_split,
+                                        data.traffic_seed_hi,
+                                        data.traffic_seed_lo,
+                                    )
+                                    == 1
+                            });
+                            if !eligible {
+                                // A traffic miss on an eligible cluster is recorded.
+                                assignment.eligible = false;
+                            } else if let Some(custom) = custom {
+                                assignment.variant = custom;
+                                assignment.custom = true;
+                            } else {
+                                assignment.variant = switchback::assign_switchback(
+                                    cluster_key,
+                                    period,
+                                    seed,
+                                    data.split.len(),
+                                )
+                                .map_or(0, |v| v as i32);
+                            }
+                        } else {
+                            // Before the anchor or an unservable schedule: no
+                            // draw, so a control that records nothing.
+                            assignment.eligible = false;
+                            silent = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        let exp = &self.index[experiment_name];
+        if (assignment.variant as usize) < exp.variables.len() {
+            assignment.variables = Some(exp.variables[assignment.variant as usize].clone());
+        }
+
+        let epoch = self
+            .switchbacks
+            .entry(experiment_name.to_string())
+            .or_insert_with(|| SwitchbackEpoch {
+                generation,
+                ..Default::default()
+            });
+        epoch.install(
+            period,
+            CachedAssignment {
+                assignment,
+                rule: rule_state,
+                switchback: Some(Box::new(SwitchbackSlot {
+                    serving,
+                    resolved_at,
+                    audience: data.audience.clone(),
+                    audience_strict: data.audience_strict,
+                    silent,
+                    custom,
+                })),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// The Collector's `switchbackServing` at `now`, for every context unit
+    /// of a linked type. A missing, empty or unreadable cluster map takes the
+    /// legacy path.
+    fn resolve_switchback_serving(&self, experiment_name: &str, now: i64) -> Serving {
+        let exp = &self.index[experiment_name];
+        let def = exp.switchback.as_ref().expect("a switchback experiment");
+        let has_unit = |unit_type: &str| self.units.contains_key(unit_type);
+        let Some(sources) = &def.sources else {
+            return switchback::legacy_serving(exp.data.unit_type.as_deref(), has_unit);
+        };
+        switchback::resolve_serving(
+            sources,
+            exp.data.switchback_cluster_values.as_deref(),
+            has_unit,
+            |path| {
+                let attribute = self.latest_attribute(path.root_key(), now)?;
+                switchback::cluster_key(path.resolve_attribute(&attribute.value)?)
+            },
+        )
+    }
+
+    /// When a switchback slot's exposure is stamped: the exposing call's
+    /// reading `now`, unless the attributes at `now` no longer give the
+    /// slot's serving unit and cluster key (an attribute changed since the
+    /// slot was resolved in this period). Then it is the reading the serving
+    /// was resolved at, so the Collector, which resolves the cluster again at
+    /// `exposedAt`, serves the same cluster the variant came from.
+    fn switchback_exposed_at(&self, experiment_name: &str, slot: Slot, now: i64) -> i64 {
+        let Slot::Switchback { period, .. } = slot else {
+            return now;
+        };
+        let Some(state) = self
+            .switchbacks
+            .get(experiment_name)
+            .and_then(|epoch| epoch.slot(period))
+            .and_then(|cached| cached.switchback.as_ref())
+        else {
+            return now;
+        };
+        // Equal readings stamp the same either way; skip re-resolving.
+        if state.resolved_at == now
+            || !self.index.contains_key(experiment_name)
+            || self.resolve_switchback_serving(experiment_name, now) == state.serving
+        {
+            now
+        } else {
+            state.resolved_at
+        }
+    }
+
+    /// The attribute the Collector records with an exposure at `now`: among
+    /// those set at or before `now` whose trimmed name matches, the latest
+    /// `setAt`, and on a tie the one set last.
+    fn latest_attribute(&self, name: &str, now: i64) -> Option<&Attribute> {
+        self.attrs
+            .iter()
+            .filter(|a| a.set_at <= now && a.name.trim() == name)
+            .max_by_key(|a| a.set_at)
     }
 
     /// Pin the unit's arm in each holdout covering `experiment_name`. The
@@ -1263,13 +1915,30 @@ impl Context {
     /// exposures of the holdouts pinned in its assignment that this unit
     /// has not seen yet. As in the JS SDK, each exposure is queued before
     /// the event logger sees it.
-    fn trigger_exposures(&mut self, experiment_name: &str) {
-        let Some(cached) = self.assignments.get(experiment_name) else {
+    ///
+    /// A switchback exposure is stamped with the clock reading that chose its
+    /// period, so analysis places it in the period whose variant it served.
+    /// A switchback the Collector records nothing for queues nothing.
+    fn trigger_exposures(&mut self, experiment_name: &str, slot: Slot) {
+        let now = match slot {
+            Slot::Unit => self.now(),
+            Slot::Switchback { now, .. } => self.switchback_exposed_at(experiment_name, slot, now),
+        };
+        let cached = match slot {
+            Slot::Unit => self.assignments.get(experiment_name),
+            Slot::Switchback { period, .. } => self
+                .switchbacks
+                .get(experiment_name)
+                .and_then(|epoch| epoch.slot(period)),
+        };
+        let Some(cached) = cached else {
             return;
         };
-        let now = now_millis();
         let first = self.exposures.len();
-        if !cached.suppressed || cached.assignment.overridden || cached.rule.rule_override {
+        let silent = cached.switchback.as_ref().is_some_and(|s| s.silent);
+        if !silent
+            && (!cached.suppressed || cached.assignment.overridden || cached.rule.rule_override)
+        {
             let a = &cached.assignment;
             self.exposures.push(Exposure {
                 id: a.id,
@@ -1327,18 +1996,28 @@ impl Context {
     /// whose length differs from the variant count, is ignored. A split with
     /// no unit to randomize over (or with `unit_pinned_missing`) gives the
     /// full-on variant and is flagged `missing_unit`.
+    /// A switchback's split rule randomizes over its serving unit, given as
+    /// `serving_unit`; every other experiment's over its `unitType`.
     fn resolve_rule(
         &mut self,
         experiment_name: &str,
+        serving_unit: Option<&str>,
         unit_pinned_missing: bool,
     ) -> Option<(i32, bool)> {
         let exp = self.index.get(experiment_name)?;
         let rules = exp.rules.clone()?;
         let variant_count = exp.data.variants.len();
-        let unit_type = exp.data.unit_type.clone();
+        let unit_type = match serving_unit {
+            Some(unit_type) => Some(unit_type.to_string()),
+            None => exp.data.unit_type.clone(),
+        };
         let (full_on_variant, seed_hi, seed_lo) =
             (exp.data.full_on_variant, exp.data.seed_hi, exp.data.seed_lo);
 
+        #[cfg(test)]
+        {
+            self.rule_evaluations += 1;
+        }
         let attrs = self.evaluation_attributes();
         let action =
             self.audience_matcher
@@ -1382,7 +2061,7 @@ impl Context {
             .rule
             .rule_override
             .then_some((cached.assignment.variant, cached.rule.missing_unit));
-        self.resolve_rule(experiment_name, pinned) == expected
+        self.resolve_rule(experiment_name, None, pinned) == expected
     }
 
     fn experiment_matches(experiment: &ExperimentData, assignment: &Assignment) -> bool {
@@ -1442,7 +2121,7 @@ impl Context {
             .collect();
 
         PublishParams {
-            published_at: now_millis(),
+            published_at: self.now(),
             units,
             hashed: true,
             exposures: if self.exposures.is_empty() {
@@ -1510,6 +2189,10 @@ fn now_millis() -> i64 {
 mod holdout_tests;
 
 #[cfg(test)]
+#[path = "context_switchback_tests.rs"]
+mod switchback_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -1544,6 +2227,7 @@ mod tests {
             assignment_rules: String::new(),
             holdout_ids: vec![],
             holdout_type: None,
+            ..Default::default()
         }
     }
 
@@ -2071,6 +2755,7 @@ mod tests {
             assignment_rules: String::new(),
             holdout_ids: vec![],
             holdout_type: None,
+            ..Default::default()
         }
     }
 

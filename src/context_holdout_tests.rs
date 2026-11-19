@@ -861,7 +861,7 @@ fn trigger_fires_holdout_exposure_from_decision_epoch_despite_refresh_racing_bet
     let mut iteration2 = holdout(11, "holdout_h", HOLDOUT_A);
     iteration2["iteration"] = json!(2);
     ctx.init(data(vec![iteration2], vec![exp()]));
-    ctx.trigger_exposures("exp_epoch_race");
+    ctx.trigger_exposures("exp_epoch_race", Slot::Unit);
 
     assert_eq!(
         queued(&mut ctx),
@@ -1147,7 +1147,7 @@ fn trigger_applicable_holdout_exposures_never_live_resolves_a_pinned_null_entry_
         ctx.variable_value("my_var", "default").unwrap(),
         json!("value_from_variant")
     );
-    ctx.trigger_exposures("exp_a_mutant_pinned_null");
+    ctx.trigger_exposures("exp_a_mutant_pinned_null", Slot::Unit);
     assert_eq!(ctx.pending(), 2);
     assert_eq!(
         queued(&mut ctx)

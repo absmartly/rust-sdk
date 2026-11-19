@@ -1,0 +1,2 @@
+# Vendored byte for byte from the platform; a test checks their git blob ids.
+tests/data/switchback/*.json -text
