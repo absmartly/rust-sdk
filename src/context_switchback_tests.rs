@@ -1104,7 +1104,8 @@ fn strict_mismatched_switchback_gives_way_on_a_shared_variable_key() {
     assert_eq!(ctx.pending(), 0);
     assert_eq!(ctx.variable_value("sb.arm", -1).unwrap(), json!(11));
     let exposures = queued(&mut ctx);
-    // Only the experiment that supplied the value is exposed, as in java-sdk.
+    // The strict-mismatched switchback is not assigned, so only the experiment
+    // that supplied the value is exposed, as in java-sdk.
     assert_eq!(
         exposures,
         vec![seen(
@@ -3991,6 +3992,52 @@ fn assigned_switchback_without_the_key_is_exposed_by_a_variable_lookup() {
             exposure(2, "exp_b", EXPECTED_2_ARMS[0], ANCHOR + 5, true, true),
         ]
     );
+}
+
+// An overridden or rule-won switchback is not "assigned", but it applies, so
+// a variable lookup that walks past its key-less variant still exposes it.
+#[test]
+fn overridden_or_rule_won_switchback_without_the_key_is_exposed_by_a_variable_lookup() {
+    for won_by_rule in [false, true] {
+        let mut first = switchback(1, "exp_a", 2, HOUR);
+        first["variants"] = json!([{"name": "A", "config": r#"{"other":0}"#}, {"name": "B", "config": r#"{"sb.arm":1}"#}]);
+        if won_by_rule {
+            first["assignmentRules"] =
+                json!(r#"{"rules":[{"type":"assign","environments":[],"variant":0}]}"#);
+        }
+        let second = switchback(2, "exp_b", 2, HOUR);
+        let clock = Clock::new(ANCHOR + 5);
+        let mut ctx = context(&clock, data_of(vec![first, second]));
+        if !won_by_rule {
+            ctx.set_override("exp_a", 0).unwrap();
+        }
+        assert_eq!(
+            ctx.variable_value("sb.arm", -1).unwrap(),
+            json!(EXPECTED_2_ARMS[0])
+        );
+        assert_eq!(
+            queued(&mut ctx),
+            vec![
+                seen(
+                    1,
+                    "exp_a",
+                    UNIT_TYPE,
+                    0,
+                    ANCHOR + 5,
+                    false,
+                    true,
+                    !won_by_rule,
+                    false,
+                    false,
+                    false,
+                    won_by_rule
+                ),
+                exposure(2, "exp_b", EXPECTED_2_ARMS[0], ANCHOR + 5, true, true),
+            ],
+            "won by rule: {}",
+            won_by_rule
+        );
+    }
 }
 
 // A split with more arms than variants never serves or exposes an arm that

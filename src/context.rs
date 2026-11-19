@@ -929,8 +929,10 @@ impl Context {
             {
                 suppressed_fallback = Some(variables.get(key).cloned());
             }
-            // A switchback is exposed only when it supplies the value, as in
-            // java-sdk; a unit experiment walked past is exposed as before.
+            // As in java-sdk, a switchback that is not assigned, overridden or
+            // rule-won (a strict audience mismatch, say) is walked past without
+            // an exposure; any other is exposed even when its variant lacks the
+            // key. A unit experiment walked past is exposed as before.
             let walked_past_switchback = matches!(slot, Slot::Switchback { .. })
                 && !(a.assigned || a.overridden || cached.rule.rule_override);
             if expose && !a.exposed && !walked_past_switchback {
