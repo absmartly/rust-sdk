@@ -3975,6 +3975,36 @@ fn switchback_without_the_key_is_not_exposed_by_a_variable_lookup() {
     );
 }
 
+// A split with more arms than variants never serves or exposes an arm that
+// has no variant: the schedule is unservable, so a silent control.
+#[test]
+fn split_and_variant_arity_mismatch_is_a_silent_control() {
+    for split in [json!([0.5, 0.5, 0.0]), json!([0.5, 0.25, 0.25])] {
+        let mut experiment = sb(2, HOUR);
+        experiment["split"] = split.clone();
+        let clock = Clock::new(ANCHOR);
+        let mut ctx = context(&clock, data_of(vec![experiment]));
+        for i in 0..6 {
+            clock.set(ANCHOR + i * HOUR);
+            assert_eq!(ctx.treatment("exp_sb").unwrap(), 0, "{}", split);
+            assert_eq!(
+                ctx.variable_value("sb.arm", -1).unwrap(),
+                json!(0),
+                "{}",
+                split
+            );
+        }
+        assert_eq!(ctx.pending(), 0, "{}", split);
+    }
+    // Fewer split entries than variants is unservable too.
+    let mut experiment = sb(3, HOUR);
+    experiment["split"] = json!([0.5, 0.5]);
+    let clock = Clock::new(ANCHOR + HOUR);
+    let mut ctx = context(&clock, data_of(vec![experiment]));
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), 0);
+    assert_eq!(ctx.pending(), 0);
+}
+
 // ---- wire model ----
 
 // The cluster map keeps its JSON key order, which is neither sorted nor

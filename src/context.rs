@@ -60,8 +60,10 @@ fn is_switchback(experiment: &ExperimentData) -> bool {
 
 /// Whether the Collector's Registry can serve the schedule: an hour-aligned
 /// anchor in `[0, 10000-01-01)` (used as served, never rounded), a period
-/// over 0 and at least two arms. An unservable schedule only replaces the
-/// draw: assignment rules, the audience and full-on still apply.
+/// over 0 and at least two arms, one `variants` entry per arm (otherwise the
+/// draw could serve and expose an arm with no variant). An unservable
+/// schedule only replaces the draw: assignment rules, the audience and
+/// full-on still apply.
 fn switchback_schedule_servable(experiment: &ExperimentData) -> bool {
     experiment.switchback_start_at.is_some_and(|start| {
         (0..SWITCHBACK_MAX_ANCHOR_MS).contains(&start)
@@ -70,6 +72,7 @@ fn switchback_schedule_servable(experiment: &ExperimentData) -> bool {
         .switchback_period_ms
         .is_some_and(|period| period > 0)
         && experiment.split.len() >= 2
+        && experiment.split.len() == experiment.variants.len()
 }
 
 /// `floorDiv(now - switchbackStartAt, switchbackPeriodMs)`, or `None`
