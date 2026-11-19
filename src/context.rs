@@ -299,6 +299,9 @@ pub struct Context {
     /// Switchback lookups made by `assign`.
     #[cfg(test)]
     switchback_lookups: usize,
+    /// Reads that went through the generic (switchback-aware) `assign`.
+    #[cfg(test)]
+    generic_assigns: usize,
 }
 
 impl Context {
@@ -338,6 +341,8 @@ impl Context {
             rule_evaluations: 0,
             #[cfg(test)]
             switchback_lookups: 0,
+            #[cfg(test)]
+            generic_assigns: 0,
         }
     }
 
@@ -926,7 +931,8 @@ impl Context {
             }
             // A switchback is exposed only when it supplies the value, as in
             // java-sdk; a unit experiment walked past is exposed as before.
-            let walked_past_switchback = value.is_none() && matches!(slot, Slot::Switchback { .. });
+            let walked_past_switchback = matches!(slot, Slot::Switchback { .. })
+                && !(a.assigned || a.overridden || cached.rule.rule_override);
             if expose && !a.exposed && !walked_past_switchback {
                 if let Some(entry) = self.cached_mut(&exp_name, slot) {
                     entry.assignment.exposed = true;
@@ -1247,6 +1253,10 @@ impl Context {
         experiment_name: &str,
         now: &mut Option<i64>,
     ) -> (&CachedAssignment, Slot) {
+        #[cfg(test)]
+        {
+            self.generic_assigns += 1;
+        }
         let slot = if self.has_switchbacks && {
             #[cfg(test)]
             {

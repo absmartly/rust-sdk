@@ -3758,6 +3758,25 @@ fn refresh_removing_every_switchback_skips_the_switchback_lookup_again() {
     assert_eq!(ctx.switchback_lookups, before);
 }
 
+// Every read API takes the unit fast path, never the generic switchback-aware
+// one, while the data has no switchback.
+#[test]
+fn unit_only_reads_skip_the_generic_path() {
+    let clock = Clock::new(ANCHOR);
+    let mut unit = sb(2, HOUR);
+    unit["randomizationType"] = json!("unit");
+    let mut ctx = context(&clock, data_of(vec![unit.clone()]));
+    ctx.treatment("exp_sb").unwrap();
+    ctx.peek("exp_sb").unwrap();
+    ctx.variable_value("sb.arm", -1).unwrap();
+    ctx.peek_variable_value("sb.arm", -1).unwrap();
+    assert_eq!(ctx.generic_assigns, 0);
+
+    ctx.refresh_with(data_of(vec![unit, switchback(2, "exp_other", 2, HOUR)]));
+    ctx.peek("exp_sb").unwrap();
+    assert!(ctx.generic_assigns > 0);
+}
+
 // A variable lookup reads the clock once: the switchback it walks past (not
 // exposed, as in java-sdk) and the one that supplies the value share the
 // reading, so the exposure is stamped with the reading that chose its period.
@@ -3945,9 +3964,10 @@ fn refresh_enabling_strict_audience_rebuilds_the_slot() {
 }
 
 // A switchback whose served variant lacks the key does not supply it, so the
-// lookup moves on and only the experiment that supplies it is exposed.
+// lookup moves on; being assigned, it is still exposed, so control periods
+// read only through variables are recorded.
 #[test]
-fn switchback_without_the_key_is_not_exposed_by_a_variable_lookup() {
+fn assigned_switchback_without_the_key_is_exposed_by_a_variable_lookup() {
     let mut first = switchback(1, "exp_a", 2, HOUR);
     first["variants"] = json!([{"name": "A", "config": r#"{"other":0}"#}, {"name": "B", "config": r#"{"other":1}"#}]);
     first["variants"][1]["config"] = json!(r#"{"sb.arm":1}"#);
@@ -3962,16 +3982,14 @@ fn switchback_without_the_key_is_not_exposed_by_a_variable_lookup() {
         ctx.variable_value("sb.arm", -1).unwrap(),
         json!(EXPECTED_2_ARMS[0])
     );
+    // exp_a is assigned (arm 0, a control without the key), so it is exposed
+    // as java-sdk does; only an unassigned switchback is walked past silently.
     assert_eq!(
         queued(&mut ctx),
-        vec![exposure(
-            2,
-            "exp_b",
-            EXPECTED_2_ARMS[0],
-            ANCHOR + 5,
-            true,
-            true
-        )]
+        vec![
+            exposure(1, "exp_a", 0, ANCHOR + 5, true, true),
+            exposure(2, "exp_b", EXPECTED_2_ARMS[0], ANCHOR + 5, true, true),
+        ]
     );
 }
 
