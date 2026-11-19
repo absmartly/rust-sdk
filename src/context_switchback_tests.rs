@@ -3738,6 +3738,26 @@ fn unit_only_payloads_skip_the_switchback_lookup() {
     assert_eq!(ctx.switchback_lookups, 1);
 }
 
+// A refresh that removes every switchback puts reads back on the unit path.
+#[test]
+fn refresh_removing_every_switchback_skips_the_switchback_lookup_again() {
+    let clock = Clock::new(ANCHOR);
+    let mut unit = sb(2, HOUR);
+    unit["randomizationType"] = json!("unit");
+    let mut ctx = context(
+        &clock,
+        data_of(vec![unit.clone(), switchback(2, "exp_other", 2, HOUR)]),
+    );
+    ctx.treatment("exp_sb").unwrap();
+    let before = ctx.switchback_lookups;
+    assert!(before > 0);
+    ctx.refresh_with(data_of(vec![unit]));
+    ctx.treatment("exp_sb").unwrap();
+    ctx.peek("exp_sb").unwrap();
+    ctx.variable_value("sb.arm", -1).unwrap();
+    assert_eq!(ctx.switchback_lookups, before);
+}
+
 // A variable lookup reads the clock once: the switchback it walks past (not
 // exposed, as in java-sdk) and the one that supplies the value share the
 // reading, so the exposure is stamped with the reading that chose its period.
