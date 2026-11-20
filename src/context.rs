@@ -1254,6 +1254,8 @@ impl Context {
     /// the experiment is still covered by the same holdouts.
     #[cold]
     fn coverage_still_matches(&self, experiment_name: &str, cached: &CachedAssignment) -> bool {
+        #[cfg(test)]
+        COVERAGE_COMPARISONS.with(|n| n.set(n.get() + 1));
         let matches = match self.index.get(experiment_name) {
             Some(exp) => Self::holdout_set_matches(&exp.holdouts, &cached.holdouts),
             None => true,
@@ -1506,6 +1508,11 @@ impl Context {
     fn log_error(&self, message: &str) {
         self.log_event("error", Some(json!({ "message": message })));
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static COVERAGE_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn now_millis() -> i64 {

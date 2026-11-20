@@ -40,7 +40,17 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   same name matched the audience.
 - An exposure is queued before the event logger receives it, as in
   javascript-sdk, so `pending()` read inside an `exposure` callback already
-  counts it, and a panicking logger no longer loses the exposure.
+  counts it, and a panicking logger no longer loses the exposure. When one
+  call queues an experiment's exposure and its holdouts' exposures, all of
+  them are queued before the first callback, so `pending()` in that
+  callback already counts every one (javascript-sdk counts them one at a
+  time). Payloads and order are the same.
+- **This can change assignment** for payloads that already carry
+  `holdouts` and `holdoutIds`: 0.1.0 ignored them, while 0.2.0 gives a
+  held-out unit variant 0 and control variables and queues the holdout
+  exposures. Payloads without holdouts are unaffected.
+- A panicking event logger during `variable_value()` is resumed only after
+  the remaining candidate experiments have queued their exposures.
 - The `X-Agent` header is now `absmartly-rust-sdk/<version>`. A configured
   `agent` is still sent as `User-Agent`.
 - **BREAKING (source):** `ExperimentData` gained `assignment_rules: String` and

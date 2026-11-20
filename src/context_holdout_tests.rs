@@ -677,6 +677,22 @@ fn refresh_with_seed_change_same_iteration_keeps_unit_in_original_arm_and_does_n
 }
 
 #[test]
+fn warmed_reads_after_refresh_compare_holdout_coverage_only_once() {
+    let exp = || covered_by(experiment(1, "exp_coverage_once"), &[11]);
+    let mut ctx = context(UID, single_holdout(HOLDOUT_A, vec![exp()]));
+    ctx.treatment("exp_coverage_once").unwrap();
+    ctx.refresh_with(single_holdout(HOLDOUT_A, vec![exp()]));
+
+    let comparisons = || super::COVERAGE_COMPARISONS.with(|n| n.get());
+    let before = comparisons();
+    for _ in 0..100 {
+        ctx.peek("exp_coverage_once").unwrap();
+        ctx.treatment("exp_coverage_once").unwrap();
+    }
+    assert_eq!(comparisons() - before, 1);
+}
+
+#[test]
 fn refresh_with_cosmetic_holdout_edit_does_not_re_expose_held_out_unit() {
     let exp = || covered_by(experiment(1, "exp_holdout_cosmetic"), &[11]);
     let mut ctx = context(UID, single_holdout(HOLDOUT_A, vec![exp()]));
