@@ -630,7 +630,7 @@ impl Context {
     ) -> Result<Value, String> {
         self.check_ready(true)?;
         Ok(self
-            .resolve_variable_value(key, true)
+            .resolve_variable_value(key)
             .unwrap_or_else(|| default_value.into()))
     }
 
@@ -641,8 +641,30 @@ impl Context {
     ) -> Result<Value, String> {
         self.check_ready(true)?;
         Ok(self
-            .resolve_variable_value(key, false)
+            .peek_variable(key)
             .unwrap_or_else(|| default_value.into()))
+    }
+
+    /// [`Self::resolve_variable_value`] without exposures, kept as its own
+    /// walk so a peek does not pay for the exposure bookkeeping.
+    fn peek_variable(&mut self, key: &str) -> Option<Value> {
+        let experiment_names = self.index_variables.get(key)?.clone();
+        let mut suppressed_fallback: Option<Option<Value>> = None;
+        for exp_name in experiment_names {
+            let cached = self.assign(&exp_name);
+            let a = &cached.assignment;
+            let Some(variables) = &a.variables else {
+                continue;
+            };
+            if a.assigned || a.overridden || cached.rule.rule_override {
+                if let Some(value) = variables.get(key) {
+                    return Some(value.clone());
+                }
+            } else if cached.suppressed && suppressed_fallback.is_none() {
+                suppressed_fallback = Some(variables.get(key).cloned());
+            }
+        }
+        suppressed_fallback.flatten()
     }
 
     /// The value of `key` from the first experiment that assigns it. A
@@ -650,49 +672,61 @@ impl Context {
     /// experiment instead of the caller's default when nothing else wins.
     /// A panicking event logger is resumed only after the remaining
     /// candidates have queued their exposures.
-    fn resolve_variable_value(&mut self, key: &str, expose: bool) -> Option<Value> {
+    fn resolve_variable_value(&mut self, key: &str) -> Option<Value> {
         let experiment_names = self.index_variables.get(key)?.clone();
         let mut suppressed_fallback: Option<Option<Value>> = None;
         let mut deferred_panic = None;
-        let mut winner = None;
         for exp_name in experiment_names {
             let cached = self.assign(&exp_name);
             let a = &cached.assignment;
             let Some(variables) = &a.variables else {
                 continue;
             };
-            let value = variables
-                .get(key)
-                .filter(|_| a.assigned || a.overridden || cached.rule.rule_override)
-                .cloned();
-            if value.is_none()
-                && suppressed_fallback.is_none()
-                && cached.suppressed
-                && !a.overridden
-                && !cached.rule.rule_override
-            {
+            let wins = a.assigned || a.overridden || cached.rule.rule_override;
+            let value = if wins { variables.get(key) } else { None };
+            if a.exposed {
+                if let Some(value) = value {
+                    let value = value.clone();
+                    return Self::settle(deferred_panic, Some(value));
+                }
+            }
+            if !wins && cached.suppressed && suppressed_fallback.is_none() {
                 suppressed_fallback = Some(variables.get(key).cloned());
             }
-            if expose && !a.exposed {
+            if !a.exposed {
+                let value = value.cloned();
                 if let Some(entry) = self.assignments.get_mut(&exp_name) {
                     entry.assignment.exposed = true;
                 }
-                let triggered =
-                    panic::catch_unwind(AssertUnwindSafe(|| self.trigger_exposures(&exp_name)));
-                if let Err(payload) = triggered {
+                if let Err(payload) = self.trigger_exposures_deferred(&exp_name) {
                     deferred_panic.get_or_insert(payload);
                 }
-            }
-
-            if value.is_some() {
-                winner = value;
-                break;
+                if value.is_some() {
+                    return Self::settle(deferred_panic, value);
+                }
             }
         }
+        Self::settle(deferred_panic, suppressed_fallback.flatten())
+    }
+
+    /// `value`, or the deferred logger panic resumed unchanged.
+    fn settle(
+        deferred_panic: Option<Box<dyn std::any::Any + Send>>,
+        value: Option<Value>,
+    ) -> Option<Value> {
         if let Some(payload) = deferred_panic {
             panic::resume_unwind(payload);
         }
-        winner.or_else(|| suppressed_fallback.flatten())
+        value
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn trigger_exposures_deferred(
+        &mut self,
+        experiment_name: &str,
+    ) -> Result<(), Box<dyn std::any::Any + Send>> {
+        panic::catch_unwind(AssertUnwindSafe(|| self.trigger_exposures(experiment_name)))
     }
 
     pub fn variable_keys(&self) -> Result<HashMap<String, Vec<String>>, String> {
@@ -1053,6 +1087,14 @@ impl Context {
             }
         }
 
+        self.rebuild_assignment(experiment_name, has_custom, has_override);
+    }
+
+    /// The slow path of [`Self::refresh_assignment`], kept out of line so
+    /// the cache-hit check inlines into the read paths.
+    #[cold]
+    #[inline(never)]
+    fn rebuild_assignment(&mut self, experiment_name: &str, has_custom: bool, has_override: bool) {
         let exp_data_opt = self.index.get(experiment_name).map(|e| e.data.clone());
 
         let mut assignment = Assignment {
