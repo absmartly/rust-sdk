@@ -25,7 +25,8 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   context and unit type. A three-arm holdout's arm 1 holds units out of non-full-on
   experiments only; the number of arms comes from the holdout's `split`.
   `set_override()` and a matching assignment rule win over a holdout.
-  Payloads without holdouts assign and publish exactly as before.
+  Holdout support itself does not change how payloads without holdouts
+  assign or publish (exposures still gain `ruleOverride`; see Changed).
 
 ### Changed
 
