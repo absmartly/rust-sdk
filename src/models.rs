@@ -80,12 +80,10 @@ fn integral(value: &serde_json::Value) -> Option<i64> {
     })
 }
 
-/// A seed as the backend sends it (signed or unsigned 32-bit); anything
-/// else reads as 0.
+/// A seed wrapped to 32 bits like JS's `>>> 0`; a non-integral value, or
+/// one beyond 2^53, reads as 0.
 fn seed(value: &serde_json::Value) -> u32 {
-    integral(value)
-        .filter(|v| (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(v))
-        .map_or(0, |v| v as u32)
+    integral(value).map_or(0, |v| v as u32)
 }
 
 fn holdout_from_value(item: &serde_json::Value) -> Option<ExperimentData> {

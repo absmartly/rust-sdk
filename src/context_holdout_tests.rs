@@ -1459,6 +1459,20 @@ fn signed_seed_halves() {
 }
 
 #[test]
+fn out_of_range_holdout_seeds_wrap_to_32_bits_as_in_js() {
+    // JS reads seeds with `>>> 0`: 2^32 + 1 is 1, and -(2^31) - 1 is 2^31 - 1.
+    let decoded = |seed_hi: i64, seed_lo: i64| -> (u32, u32) {
+        let data = data(
+            vec![holdout(11, "h", (seed_hi, seed_lo))],
+            vec![experiment(1, "e")],
+        );
+        (data.holdouts[0].seed_hi, data.holdouts[0].seed_lo)
+    };
+    assert_eq!(decoded(4_294_967_297, -2_147_483_649), (1, 2_147_483_647));
+    assert_eq!(decoded(-1, 4_294_967_295), (u32::MAX, u32::MAX));
+}
+
+#[test]
 fn percentage_boundary_at_one_percent() {
     assert_held_out_by(
         verdict_context(
