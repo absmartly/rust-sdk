@@ -187,7 +187,14 @@ async fn real_http_get_and_put_against_local_server() {
     );
 
     // ---- 2. PUT /context (real HTTP publish, awaitable) ----
-    let params = context.get_publish_params();
+    let mut params = context.get_publish_params();
+    params.published_at = 0;
+    for exposure in params.exposures.iter_mut().flatten() {
+        exposure.exposed_at = 0;
+    }
+    for goal in params.goals.iter_mut().flatten() {
+        goal.achieved_at = 0;
+    }
     sdk.publish(&params).await.expect("publish should succeed");
 
     // ---------- Assertions on what the server actually received ----------
@@ -250,6 +257,19 @@ async fn real_http_get_and_put_against_local_server() {
     );
     let agent = put.header("X-Agent").expect("PUT must carry an X-Agent");
     assert_eq!(agent, absmartly::SDK_AGENT);
+
+    // Pin the actual request encoder, not just direct PublishParams serialization.
+    let uid = params.units[0].uid.as_ref().unwrap();
+    let expected = concat!(
+        "{\"publishedAt\":0,\"units\":[{\"type\":\"session_id\",\"uid\":",
+        "\"UID\"}],\"hashed\":true,\"exposures\":[{\"id\":1,\"name\":\"exp_test\",",
+        "\"exposedAt\":0,\"unit\":\"session_id\",\"variant\":1,\"assigned\":true,",
+        "\"eligible\":true,\"overridden\":false,\"fullOn\":true,\"custom\":false,",
+        "\"audienceMismatch\":false,\"ruleOverride\":false}],\"goals\":[{\"name\":\"payment\",",
+        "\"properties\":{\"value\":42},\"achievedAt\":0}]}"
+    )
+    .replace("UID", uid);
+    assert_eq!(put.body.as_bytes(), expected.as_bytes());
 
     // Body JSON fields required by the wire contract.
     let body: serde_json::Value =

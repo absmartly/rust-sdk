@@ -1,6 +1,7 @@
-//! A payload without holdouts publishes exactly what 0.2.0 did before
+//! Direct PublishParams serialization without holdouts is unchanged from before
 //! holdouts were added. The golden body below was recorded on main
 //! (`7c26910`) with this same test; only timestamps are normalised.
+//! The HTTP integration test separately pins the production request encoder.
 
 use absmartly::{Context, ContextData, PublishParams};
 use serde_json::{json, Value};
