@@ -2,7 +2,7 @@
 //! holdouts were added. The golden body below was recorded on main
 //! (`7c26910`) with this same test; only timestamps are normalised.
 
-use absmartly::{Context, ContextData};
+use absmartly::{Context, ContextData, PublishParams};
 use serde_json::{json, Value};
 
 const GOLDEN: &str = include_str!("data/publish_without_holdouts.json");
@@ -21,20 +21,18 @@ fn experiment(id: i64, name: &str, full_on_variant: i64, audience: Value) -> Val
     })
 }
 
-fn normalised(mut body: Value) -> Value {
-    body["publishedAt"] = json!(0);
-    for key in ["exposures", "goals", "attributes"] {
-        if let Some(items) = body[key].as_array_mut() {
-            for item in items {
-                for ts in ["exposedAt", "achievedAt", "setAt"] {
-                    if item.get(ts).is_some() {
-                        item[ts] = json!(0);
-                    }
-                }
-            }
-        }
+fn normalised(mut params: PublishParams) -> PublishParams {
+    params.published_at = 0;
+    for e in params.exposures.iter_mut().flatten() {
+        e.exposed_at = 0;
     }
-    body
+    for g in params.goals.iter_mut().flatten() {
+        g.achieved_at = 0;
+    }
+    for a in params.attributes.iter_mut().flatten() {
+        a.set_at = 0;
+    }
+    params
 }
 
 #[test]
@@ -68,16 +66,14 @@ fn publish_body_without_holdouts_is_unchanged() {
         ctx.variable_value("color", "none").unwrap();
         ctx.track("goal", json!({"amount": 1})).unwrap();
         let params = ctx.get_publish_params();
-        bodies.push(normalised(serde_json::to_value(&params).unwrap()));
+        bodies.push(normalised(params));
     }
     let actual = serde_json::to_string_pretty(&bodies).unwrap() + "\n";
 
     if std::env::var_os("RECORD_GOLDEN").is_some() {
         std::fs::write("tests/data/publish_without_holdouts.json", &actual).unwrap();
     }
-    // Compared as JSON values so a CRLF checkout of the golden file (Windows)
-    // still matches. Serialization writes struct fields in declaration order,
-    // so only line endings are lost by not comparing the text.
-    let golden: Value = serde_json::from_str(GOLDEN).unwrap();
-    assert_eq!(serde_json::to_value(&bodies).unwrap(), golden);
+    // Byte-for-byte, so field order and formatting are pinned too. Only CR
+    // is dropped, for a CRLF checkout of the golden file (Windows).
+    assert_eq!(actual, GOLDEN.replace('\r', ""));
 }

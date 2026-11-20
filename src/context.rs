@@ -1,6 +1,7 @@
 use log::{error, warn};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -647,9 +648,13 @@ impl Context {
     /// The value of `key` from the first experiment that assigns it. A
     /// held-out unit reads the control value of the first suppressed
     /// experiment instead of the caller's default when nothing else wins.
+    /// A panicking event logger is resumed only after the remaining
+    /// candidates have queued their exposures.
     fn resolve_variable_value(&mut self, key: &str, expose: bool) -> Option<Value> {
         let experiment_names = self.index_variables.get(key)?.clone();
         let mut suppressed_fallback: Option<Option<Value>> = None;
+        let mut deferred_panic = None;
+        let mut winner = None;
         for exp_name in experiment_names {
             let cached = self.assign(&exp_name);
             let a = &cached.assignment;
@@ -672,14 +677,22 @@ impl Context {
                 if let Some(entry) = self.assignments.get_mut(&exp_name) {
                     entry.assignment.exposed = true;
                 }
-                self.trigger_exposures(&exp_name);
+                let triggered =
+                    panic::catch_unwind(AssertUnwindSafe(|| self.trigger_exposures(&exp_name)));
+                if let Err(payload) = triggered {
+                    deferred_panic.get_or_insert(payload);
+                }
             }
 
             if value.is_some() {
-                return value;
+                winner = value;
+                break;
             }
         }
-        suppressed_fallback.flatten()
+        if let Some(payload) = deferred_panic {
+            panic::resume_unwind(payload);
+        }
+        winner.or_else(|| suppressed_fallback.flatten())
     }
 
     pub fn variable_keys(&self) -> Result<HashMap<String, Vec<String>>, String> {

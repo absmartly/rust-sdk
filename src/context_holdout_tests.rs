@@ -1632,6 +1632,68 @@ fn throwing_logger_does_not_make_experiment_or_holdout_exposure_retryable() {
     );
 }
 
+#[test]
+fn throwing_logger_does_not_strand_later_variable_candidates_holdout_exposure() {
+    let first = covered_by(
+        with_variables(experiment(1, "exp_var_panic_first"), "k"),
+        &[11],
+    );
+    let second = covered_by(
+        with_variables(experiment(2, "exp_var_panic_second"), "k"),
+        &[12],
+    );
+    let mut ctx = context(
+        UID,
+        data(
+            vec![
+                holdout(11, "holdout_a", HOLDOUT_A),
+                holdout(12, "holdout_c", HOLDOUT_A),
+            ],
+            vec![first, second],
+        ),
+    );
+    let armed = Arc::new(AtomicBool::new(true));
+    ctx.set_event_logger(panicking_logger(11, armed.clone()));
+
+    let result = catch_unwind(AssertUnwindSafe(|| ctx.variable_value("k", "default")));
+
+    assert_eq!(
+        result.unwrap_err().downcast_ref::<&str>(),
+        Some(&"boom"),
+        "the original panic is resumed"
+    );
+    armed.store(false, Ordering::Relaxed);
+    assert_eq!(
+        queued(&mut ctx),
+        vec![
+            holdout_exposure(11, "holdout_a", 0),
+            holdout_exposure(12, "holdout_c", 0)
+        ]
+    );
+}
+
+#[test]
+fn throwing_logger_on_variable_winner_still_stops_the_candidate_walk() {
+    let winner = with_config(
+        experiment(1, "exp_var_panic_winner"),
+        1,
+        json!({"k": "won"}),
+    );
+    let later = covered_by(
+        with_variables(experiment(2, "exp_var_panic_later"), "k"),
+        &[11],
+    );
+    let mut ctx = context(UID, single_holdout(HOLDOUT_A, vec![winner, later]));
+    ctx.set_event_logger(panicking_logger(1, Arc::new(AtomicBool::new(true))));
+
+    assert!(catch_unwind(AssertUnwindSafe(|| ctx.variable_value("k", "default"))).is_err());
+    ctx.set_event_logger(Box::new(|_, _, _| {}));
+    assert_eq!(
+        queued(&mut ctx),
+        vec![normal(1, "exp_var_panic_winner", NORMAL_VARIANT)]
+    );
+}
+
 // Java checks a flush is scheduled; this crate has no timer in `Context`,
 // so the exposure must still be queued and publishable.
 #[test]
