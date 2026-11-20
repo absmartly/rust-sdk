@@ -840,7 +840,7 @@ impl Context {
     }
 
     /// Apply `new_data` as a refresh, keeping assignments that are still
-    /// valid. Returns `()` as in 0.1; if the context is not ready or is
+    /// valid. Returns `()` like 0.1's `refresh(data)`; if the context is not ready or is
     /// finalizing/finalized the data is left unchanged and an `error` event is
     /// emitted. Use [`Context::try_refresh_with`] to get the error back.
     pub fn refresh_with(&mut self, new_data: ContextData) {
@@ -4333,6 +4333,8 @@ mod tests {
             // then fails the bounds check instead of moving on.
             json!({"type": "assign", "variant": 2147483648_i64}),
             json!({"type": "assign", "variant": -2147483649_i64}),
+            // Would wrap to 1 if narrowed to i32 before the bounds check.
+            json!({"type": "assign", "variant": 4294967297_i64}),
             json!({"type": "assign", "variant": 1e300}),
             json!({"type": "split", "percentages": "50/50"}),
         ] {
@@ -4368,6 +4370,10 @@ mod tests {
         exp.traffic_split = vec![1.0, 0.0];
         let mut ctx = Context::new(make_context_data(vec![exp]));
         ctx.set_unit("session_id", "user").unwrap();
+        assert_eq!(
+            ctx.peek_variable_value("color", "none").unwrap(),
+            json!("blue")
+        );
         assert_eq!(ctx.treatment("rules_exp").unwrap(), 2);
         assert!(exposures(&mut ctx)[0].rule_override);
     }
