@@ -1,6 +1,7 @@
 use log::{error, warn};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -884,7 +885,7 @@ impl Context {
     ) -> Result<Value, String> {
         self.check_ready(true)?;
         Ok(self
-            .resolve_variable_value(key, true)
+            .resolve_variable_value(key)
             .unwrap_or_else(|| default_value.into()))
     }
 
@@ -895,19 +896,52 @@ impl Context {
     ) -> Result<Value, String> {
         self.check_ready(true)?;
         Ok(self
-            .resolve_variable_value(key, false)
+            .peek_variable(key)
             .unwrap_or_else(|| default_value.into()))
+    }
+
+    /// [`Self::resolve_variable_value`] without exposures, kept as its own
+    /// walk so a peek does not pay for the exposure bookkeeping.
+    fn peek_variable(&mut self, key: &str) -> Option<Value> {
+        let candidate_count = self.index_variables.get(key)?.len();
+        let mut suppressed_fallback: Option<String> = None;
+        // One clock reading for the whole lookup, taken only for a switchback.
+        let mut now = None;
+        for i in 0..candidate_count {
+            let exp_name = self.index_variables[key][i].clone();
+            let cached = if self.has_switchbacks {
+                self.assign(&exp_name, &mut now).0
+            } else {
+                self.assign_unit(&exp_name)
+            };
+            let a = &cached.assignment;
+            let Some(variables) = &a.variables else {
+                continue;
+            };
+            if a.assigned || a.overridden || cached.rule.rule_override {
+                if let Some(value) = variables.get(key) {
+                    return Some(value.clone());
+                }
+            } else if cached.suppressed && suppressed_fallback.is_none() {
+                suppressed_fallback = Some(exp_name);
+            }
+        }
+        self.control_value(suppressed_fallback?, key)
     }
 
     /// The value of `key` from the first experiment that assigns it. A
     /// held-out unit reads the control value of the first suppressed
     /// experiment instead of the caller's default when nothing else wins.
-    fn resolve_variable_value(&mut self, key: &str, expose: bool) -> Option<Value> {
-        let experiment_names = self.index_variables.get(key)?.clone();
-        let mut suppressed_fallback: Option<Option<Value>> = None;
+    /// A panicking event logger is resumed only after the remaining
+    /// candidates have queued their exposures.
+    fn resolve_variable_value(&mut self, key: &str) -> Option<Value> {
+        let candidate_count = self.index_variables.get(key)?.len();
+        let mut suppressed_fallback: Option<String> = None;
+        let mut deferred_panic = None;
         // One clock reading for the whole lookup, taken only for a switchback.
         let mut now = None;
-        for exp_name in experiment_names {
+        for i in 0..candidate_count {
+            let exp_name = self.index_variables[key][i].clone();
             let (cached, slot) = if self.has_switchbacks {
                 self.assign(&exp_name, &mut now)
             } else {
@@ -917,36 +951,72 @@ impl Context {
             let Some(variables) = &a.variables else {
                 continue;
             };
-            let value = variables
-                .get(key)
-                .filter(|_| a.assigned || a.overridden || cached.rule.rule_override)
-                .cloned();
-            if value.is_none()
-                && suppressed_fallback.is_none()
-                && cached.suppressed
-                && !a.overridden
-                && !cached.rule.rule_override
-            {
-                suppressed_fallback = Some(variables.get(key).cloned());
+            let wins = a.assigned || a.overridden || cached.rule.rule_override;
+            let value = if wins { variables.get(key) } else { None };
+            if a.exposed {
+                if let Some(value) = value {
+                    let value = value.clone();
+                    return Self::settle(deferred_panic, Some(value));
+                }
             }
+            let fallback = !wins && cached.suppressed && suppressed_fallback.is_none();
             // As in java-sdk, a switchback that is not assigned, overridden or
             // rule-won (a strict audience mismatch, say) is walked past without
             // an exposure; any other is exposed even when its variant lacks the
             // key. A unit experiment walked past is exposed as before.
-            let walked_past_switchback = matches!(slot, Slot::Switchback { .. })
-                && !(a.assigned || a.overridden || cached.rule.rule_override);
-            if expose && !a.exposed && !walked_past_switchback {
+            let walked_past_switchback = matches!(slot, Slot::Switchback { .. }) && !wins;
+            if !a.exposed && !walked_past_switchback {
+                let value = value.cloned();
                 if let Some(entry) = self.cached_mut(&exp_name, slot) {
                     entry.assignment.exposed = true;
                 }
-                self.trigger_exposures(&exp_name, slot);
+                if let Err(payload) = self.trigger_exposures_deferred(&exp_name, slot) {
+                    deferred_panic.get_or_insert(payload);
+                }
+                if value.is_some() {
+                    return Self::settle(deferred_panic, value);
+                }
             }
-
-            if value.is_some() {
-                return value;
+            if fallback {
+                suppressed_fallback = Some(exp_name);
             }
         }
-        suppressed_fallback.flatten()
+        let fallback = suppressed_fallback.and_then(|name| self.control_value(name, key));
+        Self::settle(deferred_panic, fallback)
+    }
+
+    /// The first suppressed candidate's control value for `key`, cloned only
+    /// once nothing else has won.
+    fn control_value(&self, experiment_name: String, key: &str) -> Option<Value> {
+        self.assignments[&experiment_name]
+            .assignment
+            .variables
+            .as_ref()?
+            .get(key)
+            .cloned()
+    }
+
+    /// `value`, or the deferred logger panic resumed unchanged.
+    fn settle(
+        deferred_panic: Option<Box<dyn std::any::Any + Send>>,
+        value: Option<Value>,
+    ) -> Option<Value> {
+        if let Some(payload) = deferred_panic {
+            panic::resume_unwind(payload);
+        }
+        value
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn trigger_exposures_deferred(
+        &mut self,
+        experiment_name: &str,
+        slot: Slot,
+    ) -> Result<(), Box<dyn std::any::Any + Send>> {
+        panic::catch_unwind(AssertUnwindSafe(|| {
+            self.trigger_exposures(experiment_name, slot)
+        }))
     }
 
     pub fn variable_keys(&self) -> Result<HashMap<String, Vec<String>>, String> {
@@ -1094,7 +1164,7 @@ impl Context {
     }
 
     /// Apply `new_data` as a refresh, keeping assignments that are still
-    /// valid. Returns `()` as in 0.1; if the context is not ready or is
+    /// valid. Returns `()` like 0.1's `refresh(data)`; if the context is not ready or is
     /// finalizing/finalized the data is left unchanged and an `error` event is
     /// emitted. Use [`Context::try_refresh_with`] to get the error back.
     pub fn refresh_with(&mut self, new_data: ContextData) {
@@ -1360,7 +1430,10 @@ impl Context {
         self.rebuild_assignment(experiment_name, has_custom, has_override);
     }
 
-    /// Build the unit assignment `refresh_assignment` found stale or missing.
+    /// The slow path of [`Self::refresh_assignment`], kept out of line so
+    /// the cache-hit check inlines into the read paths: build the unit
+    /// assignment it found stale or missing.
+    #[cold]
     #[inline(never)]
     fn rebuild_assignment(&mut self, experiment_name: &str, has_custom: bool, has_override: bool) {
         // Slots of a switchback that is now a unit experiment, or gone.
@@ -1893,6 +1966,8 @@ impl Context {
     /// the experiment is still covered by the same holdouts.
     #[cold]
     fn coverage_still_matches(&self, experiment_name: &str, cached: &CachedAssignment) -> bool {
+        #[cfg(test)]
+        COVERAGE_COMPARISONS.with(|n| n.set(n.get() + 1));
         let matches = match self.index.get(experiment_name) {
             Some(exp) => Self::holdout_set_matches(&exp.holdouts, &cached.holdouts),
             None => true,
@@ -2172,6 +2247,11 @@ impl Context {
     fn log_error(&self, message: &str) {
         self.log_event("error", Some(json!({ "message": message })));
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static COVERAGE_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn now_millis() -> i64 {
@@ -4998,6 +5078,8 @@ mod tests {
             // then fails the bounds check instead of moving on.
             json!({"type": "assign", "variant": 2147483648_i64}),
             json!({"type": "assign", "variant": -2147483649_i64}),
+            // Would wrap to 1 if narrowed to i32 before the bounds check.
+            json!({"type": "assign", "variant": 4294967297_i64}),
             json!({"type": "assign", "variant": 1e300}),
             json!({"type": "split", "percentages": "50/50"}),
         ] {
@@ -5033,6 +5115,10 @@ mod tests {
         exp.traffic_split = vec![1.0, 0.0];
         let mut ctx = Context::new(make_context_data(vec![exp]));
         ctx.set_unit("session_id", "user").unwrap();
+        assert_eq!(
+            ctx.peek_variable_value("color", "none").unwrap(),
+            json!("blue")
+        );
         assert_eq!(ctx.treatment("rules_exp").unwrap(), 2);
         assert!(exposures(&mut ctx)[0].rule_override);
     }

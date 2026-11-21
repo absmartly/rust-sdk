@@ -677,6 +677,22 @@ fn refresh_with_seed_change_same_iteration_keeps_unit_in_original_arm_and_does_n
 }
 
 #[test]
+fn warmed_reads_after_refresh_compare_holdout_coverage_only_once() {
+    let exp = || covered_by(experiment(1, "exp_coverage_once"), &[11]);
+    let mut ctx = context(UID, single_holdout(HOLDOUT_A, vec![exp()]));
+    ctx.treatment("exp_coverage_once").unwrap();
+    ctx.refresh_with(single_holdout(HOLDOUT_A, vec![exp()]));
+
+    let comparisons = || super::COVERAGE_COMPARISONS.with(|n| n.get());
+    let before = comparisons();
+    for _ in 0..100 {
+        ctx.peek("exp_coverage_once").unwrap();
+        ctx.treatment("exp_coverage_once").unwrap();
+    }
+    assert_eq!(comparisons() - before, 1);
+}
+
+#[test]
 fn refresh_with_cosmetic_holdout_edit_does_not_re_expose_held_out_unit() {
     let exp = || covered_by(experiment(1, "exp_holdout_cosmetic"), &[11]);
     let mut ctx = context(UID, single_holdout(HOLDOUT_A, vec![exp()]));
@@ -1443,6 +1459,20 @@ fn signed_seed_halves() {
 }
 
 #[test]
+fn out_of_range_holdout_seeds_wrap_to_32_bits_as_in_js() {
+    // JS reads seeds with `>>> 0`: 2^32 + 1 is 1, and -(2^31) - 1 is 2^31 - 1.
+    let decoded = |seed_hi: i64, seed_lo: i64| -> (u32, u32) {
+        let data = data(
+            vec![holdout(11, "h", (seed_hi, seed_lo))],
+            vec![experiment(1, "e")],
+        );
+        (data.holdouts[0].seed_hi, data.holdouts[0].seed_lo)
+    };
+    assert_eq!(decoded(4_294_967_297, -2_147_483_649), (1, 2_147_483_647));
+    assert_eq!(decoded(-1, 4_294_967_295), (u32::MAX, u32::MAX));
+}
+
+#[test]
 fn percentage_boundary_at_one_percent() {
     assert_held_out_by(
         verdict_context(
@@ -1629,6 +1659,141 @@ fn throwing_logger_does_not_make_experiment_or_holdout_exposure_retryable() {
             normal(1, "exp_throwing_logger_terminal", NORMAL_VARIANT),
             holdout_exposure(11, "holdout_terminal", 1)
         ]
+    );
+}
+
+#[test]
+fn throwing_logger_does_not_strand_later_variable_candidates_holdout_exposure() {
+    let first = covered_by(
+        with_variables(experiment(1, "exp_var_panic_first"), "k"),
+        &[11],
+    );
+    let second = covered_by(
+        with_variables(experiment(2, "exp_var_panic_second"), "k"),
+        &[12],
+    );
+    let mut ctx = context(
+        UID,
+        data(
+            vec![
+                holdout(11, "holdout_a", HOLDOUT_A),
+                holdout(12, "holdout_c", HOLDOUT_A),
+            ],
+            vec![first, second],
+        ),
+    );
+    let armed = Arc::new(AtomicBool::new(true));
+    ctx.set_event_logger(panicking_logger(11, armed.clone()));
+
+    let result = catch_unwind(AssertUnwindSafe(|| ctx.variable_value("k", "default")));
+
+    assert_eq!(
+        result.unwrap_err().downcast_ref::<&str>(),
+        Some(&"boom"),
+        "the original panic is resumed"
+    );
+    armed.store(false, Ordering::Relaxed);
+    assert_eq!(
+        queued(&mut ctx),
+        vec![
+            holdout_exposure(11, "holdout_a", 0),
+            holdout_exposure(12, "holdout_c", 0)
+        ]
+    );
+}
+
+#[test]
+fn deferred_logger_panic_is_resumed_when_an_exposed_candidate_wins() {
+    let held_out = covered_by(
+        with_variables(experiment(1, "exp_var_held_out"), "k"),
+        &[11],
+    );
+    let winner = with_config(
+        experiment(2, "exp_var_exposed_winner"),
+        1,
+        json!({"k": "won"}),
+    );
+    // Unexposed and eligible: walking past the winner would queue it.
+    let later = with_config(
+        experiment(3, "exp_var_after_winner"),
+        1,
+        json!({"k": "later"}),
+    );
+    let mut ctx = context(
+        UID,
+        single_holdout(HOLDOUT_A, vec![held_out, winner, later]),
+    );
+    ctx.treatment("exp_var_exposed_winner").unwrap();
+    let armed = Arc::new(AtomicBool::new(true));
+    ctx.set_event_logger(panicking_logger(11, armed.clone()));
+
+    let result = catch_unwind(AssertUnwindSafe(|| ctx.variable_value("k", "default")));
+
+    assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
+    armed.store(false, Ordering::Relaxed);
+    assert_eq!(
+        queued(&mut ctx),
+        vec![
+            normal(2, "exp_var_exposed_winner", NORMAL_VARIANT),
+            holdout_exposure(11, "holdout_a", 0)
+        ]
+    );
+}
+
+#[test]
+fn first_deferred_logger_panic_is_the_one_resumed() {
+    let first = covered_by(
+        with_variables(experiment(1, "exp_var_first_panic"), "k"),
+        &[11],
+    );
+    let second = covered_by(
+        with_variables(experiment(2, "exp_var_second_panic"), "k"),
+        &[12],
+    );
+    let mut ctx = context(
+        UID,
+        data(
+            vec![
+                holdout(11, "holdout_a", HOLDOUT_A),
+                holdout(12, "holdout_c", HOLDOUT_A),
+            ],
+            vec![first, second],
+        ),
+    );
+    ctx.set_event_logger(Box::new(|_, event, data| {
+        if event == "exposure" {
+            match data.as_ref().and_then(|d| d["id"].as_i64()) {
+                Some(11) => panic!("first"),
+                Some(12) => panic!("second"),
+                _ => {}
+            }
+        }
+    }));
+
+    let result = catch_unwind(AssertUnwindSafe(|| ctx.variable_value("k", "default")));
+
+    assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"first"));
+}
+
+#[test]
+fn throwing_logger_on_variable_winner_still_stops_the_candidate_walk() {
+    let winner = with_config(
+        experiment(1, "exp_var_panic_winner"),
+        1,
+        json!({"k": "won"}),
+    );
+    let later = covered_by(
+        with_variables(experiment(2, "exp_var_panic_later"), "k"),
+        &[11],
+    );
+    let mut ctx = context(UID, single_holdout(HOLDOUT_A, vec![winner, later]));
+    ctx.set_event_logger(panicking_logger(1, Arc::new(AtomicBool::new(true))));
+
+    assert!(catch_unwind(AssertUnwindSafe(|| ctx.variable_value("k", "default"))).is_err());
+    ctx.set_event_logger(Box::new(|_, _, _| {}));
+    assert_eq!(
+        queued(&mut ctx),
+        vec![normal(1, "exp_var_panic_winner", NORMAL_VARIANT)]
     );
 }
 
@@ -2021,10 +2186,15 @@ fn unknown_fields_in_holdouts_are_ignored() {
 
 #[test]
 fn malformed_holdouts_degrade_only_themselves() {
-    for holdouts in [
-        json!({"not": "an array"}),
-        json!("nope"),
-        json!([{"id": "eleven"}, holdout(11, "holdout_a", HOLDOUT_A)]),
+    // The expected verdict comes from the input, not the decoder: only the
+    // mixed list still carries a valid holdout 11, which must hold UID out.
+    for (holdouts, expected) in [
+        (json!({"not": "an array"}), NORMAL_VARIANT),
+        (json!("nope"), NORMAL_VARIANT),
+        (
+            json!([{"id": "eleven"}, holdout(11, "holdout_a", HOLDOUT_A)]),
+            0,
+        ),
     ] {
         let data: ContextData = serde_json::from_value(json!({
             "experiments": [
@@ -2034,12 +2204,22 @@ fn malformed_holdouts_degrade_only_themselves() {
             "holdouts": holdouts
         }))
         .unwrap();
-        let has_holdout = !data.holdouts.is_empty();
         let mut ctx = context(UID, data);
-        let expected = if has_holdout { 0 } else { NORMAL_VARIANT };
         assert_eq!(ctx.treatment("exp_covered").unwrap(), expected);
         assert_eq!(ctx.treatment("exp_plain").unwrap(), NORMAL_VARIANT);
     }
+
+    let mut no_id = holdout(11, "holdout_a", HOLDOUT_A);
+    no_id.as_object_mut().unwrap().remove("id");
+    let mut ctx = context(
+        UID,
+        data(
+            vec![no_id],
+            vec![covered_by(experiment(1, "exp_covered"), &[0])],
+        ),
+    );
+    assert_eq!(ctx.treatment("exp_covered").unwrap(), NORMAL_VARIANT);
+    assert_eq!(ctx.pending(), 1);
 
     let mut covered = experiment(1, "exp_covered");
     covered["holdoutIds"] = json!(["11", 11.0, null, {"id": 11}, 1.5]);
@@ -2166,6 +2346,10 @@ fn first_suppressed_candidate_decides_the_control_fallback() {
         ctx.peek_variable_value("color", "default").unwrap(),
         json!("default")
     );
+    assert_eq!(
+        ctx.variable_value("color", "default").unwrap(),
+        json!("default")
+    );
 }
 
 // JS sorts and de-duplicates the covering holdouts by id: exposures go out
@@ -2204,7 +2388,6 @@ fn holdout_ids_are_sorted_and_deduplicated() {
     );
 }
 
-// Moving coverage to another holdout id, same iteration, re-resolves.
 #[test]
 fn refresh_moving_coverage_to_another_holdout_re_resolves_experiment() {
     let holdouts = || {
@@ -2461,7 +2644,6 @@ fn overridden_or_rule_won_experiment_is_not_the_control_fallback() {
         } else {
             ctx.set_override("exp_first", 1).unwrap();
         }
-        // Make exp_first a candidate for `color` too, without the key.
         ctx.index_variables
             .get_mut("color")
             .unwrap()
@@ -2472,5 +2654,33 @@ fn overridden_or_rule_won_experiment_is_not_the_control_fallback() {
             json!("control"),
             "rule_won {rule_won}"
         );
+        assert_eq!(
+            ctx.variable_value("color", "default").unwrap(),
+            json!("control"),
+            "rule_won {rule_won}"
+        );
+    }
+}
+
+#[test]
+fn numeric_holdout_seeds_follow_js_touint32() {
+    for (input, expected) in [
+        (json!(1.9), 1),
+        (json!(-1.9), u32::MAX),
+        (json!(1e20), 1_661_992_960),
+        (json!(9007199254740993u64), 0),
+    ] {
+        for (field, other) in [("seedHi", "seedLo"), ("seedLo", "seedHi")] {
+            let mut h = holdout(11, "h", (0, 0));
+            h[field] = input.clone();
+            h[other] = json!(7);
+            let decoded = &data(vec![h], vec![]).holdouts[0];
+            let (seed, other_seed) = if field == "seedHi" {
+                (decoded.seed_hi, decoded.seed_lo)
+            } else {
+                (decoded.seed_lo, decoded.seed_hi)
+            };
+            assert_eq!((seed, other_seed), (expected, 7), "{field}: {input}");
+        }
     }
 }
