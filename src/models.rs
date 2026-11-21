@@ -55,11 +55,106 @@ where
     Ok(v as u32)
 }
 
+/// `holdouts` is lenient: `null` or a non-array means none. Each entry is
+/// read field by field, keeping only what holdout resolution uses (`id`,
+/// `name`, `unitType`, `iteration`, `seedHi`, `seedLo`, `split` and
+/// `holdoutType`), so a malformed field the SDK never reads cannot drop the
+/// holdout and let its units into the experiments it covers. An entry
+/// without an integral `id` is dropped.
+fn deserialize_holdouts<'de, D>(deserializer: D) -> Result<Vec<ExperimentData>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Array(items) => items.iter().filter_map(holdout_from_value).collect(),
+        _ => Vec::new(),
+    })
+}
+
+fn integral(value: &serde_json::Value) -> Option<i64> {
+    value.as_i64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|f| f.fract() == 0.0 && f.abs() < 9.007_199_254_740_992e15)
+            .map(|f| f as i64)
+    })
+}
+
+/// Numeric seeds use JS's ToUint32: truncate and wrap modulo 2^32.
+fn seed(value: &serde_json::Value) -> u32 {
+    value
+        .as_f64()
+        .filter(|v| v.is_finite())
+        .map_or(0, |v| v.trunc().rem_euclid(4_294_967_296.0) as u32)
+}
+
+fn holdout_from_value(item: &serde_json::Value) -> Option<ExperimentData> {
+    let string = |key: &str| item.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    let field = |key: &str| item.get(key).unwrap_or(&serde_json::Value::Null);
+    Some(ExperimentData {
+        id: integral(field("id"))?,
+        name: string("name").unwrap_or_default(),
+        unit_type: string("unitType"),
+        iteration: integral(field("iteration")).unwrap_or(0),
+        full_on_variant: 0,
+        traffic_split: Vec::new(),
+        traffic_seed_hi: 0,
+        traffic_seed_lo: 0,
+        audience: String::new(),
+        audience_strict: false,
+        split: field("split")
+            .as_array()
+            .and_then(|split| split.iter().map(|v| v.as_f64()).collect())
+            .unwrap_or_default(),
+        seed_hi: seed(field("seedHi")),
+        seed_lo: seed(field("seedLo")),
+        variants: Vec::new(),
+        variables: HashMap::new(),
+        custom_field_values: None,
+        assignment_rules: String::new(),
+        holdout_ids: Vec::new(),
+        holdout_type: string("holdoutType"),
+    })
+}
+
+/// `holdoutIds` keeps the integral ids (`11` or `11.0`) and ignores
+/// anything else, so a malformed list only loses its bad entries.
+fn deserialize_holdout_ids<'de, D>(deserializer: D) -> Result<Vec<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Array(items) => items.iter().filter_map(integral).collect(),
+        _ => Vec::new(),
+    })
+}
+
+fn deserialize_lenient_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(s) => Some(s),
+        _ => None,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextData {
     #[serde(default)]
     pub experiments: Vec<ExperimentData>,
+    /// The holdouts that experiments reference through
+    /// [`ExperimentData::holdout_ids`]. Each one is an experiment-shaped
+    /// entry, of which only `id`, `name`, `unitType`, `iteration`, `seedHi`,
+    /// `seedLo`, `split` and `holdoutType` are kept; an entry with an empty
+    /// `split` is ignored.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_holdouts",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub holdouts: Vec<ExperimentData>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +198,22 @@ pub struct ExperimentData {
         skip_serializing_if = "String::is_empty"
     )]
     pub assignment_rules: String,
+    /// The ids of the [`ContextData::holdouts`] covering this experiment.
+    /// Ids with no matching holdout are ignored.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_holdout_ids",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub holdout_ids: Vec<i64>,
+    /// Set on holdout entries (`"full"` or `"all_full_on"`). Informational
+    /// only: the number of arms is read from `split`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lenient_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub holdout_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

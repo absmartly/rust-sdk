@@ -1,6 +1,8 @@
 use log::{error, warn};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,6 +24,34 @@ struct Experiment {
     /// `assignment_rules`, so cached assignments compare it instead of the
     /// rule text.
     rules_rev: u64,
+    /// Sorted by id and unique, as in JS.
+    holdouts: Vec<Arc<ExperimentData>>,
+}
+
+/// A unit's arm in one holdout epoch, shared by every assignment that
+/// pinned it so the holdout's exposure is queued once per context.
+#[derive(Debug)]
+struct HoldoutAssignment {
+    id: i64,
+    iteration: i64,
+    variant: i32,
+    /// `split.len()` when `variant` was drawn: arm 1 means something else
+    /// for a 3-arm holdout, and a same-iteration refresh must not change it.
+    arm_count: usize,
+    unit_type: String,
+    exposed: AtomicBool,
+}
+
+#[derive(Debug, Clone)]
+struct PinnedHoldout {
+    data: Arc<ExperimentData>,
+    assignment: Option<Arc<HoldoutAssignment>>,
+}
+
+/// Arm 0 holds a unit out of every covered experiment. Arm 1 of a 3-arm
+/// (`all_full_on`) holdout only allows full-on experiments.
+fn is_held_out_by(variant: i32, arm_count: usize, full_on_variant: i64) -> bool {
+    variant == 0 || (arm_count == 3 && variant == 1 && full_on_variant == 0)
 }
 
 /// What a cached assignment's rule outcome was resolved against. Kept beside
@@ -41,10 +71,18 @@ struct RuleState {
     variant_count: usize,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 struct CachedAssignment {
     assignment: Assignment,
     rule: RuleState,
+    /// A covering holdout holds the unit out: control values, and no
+    /// exposure of its own unless an override or a rule set the variant.
+    suppressed: bool,
+    holdouts: Vec<PinnedHoldout>,
+    /// A refresh changed the experiment's holdout coverage. Checked on the
+    /// next read, as in JS, so a change that a later refresh undoes keeps
+    /// the assignment and its exposure.
+    coverage_stale: AtomicBool,
 }
 
 pub type DataFetcher = Box<dyn Fn() -> Result<ContextData, String> + Send + Sync>;
@@ -66,6 +104,9 @@ pub struct Context {
     rules_rev: u64,
     index: HashMap<String, Experiment>,
     index_variables: HashMap<String, Vec<String>>,
+    /// Holdout arms by (holdout id, covered experiment's unit type); kept
+    /// across refreshes and replaced only when the iteration changes.
+    holdout_assignments: HashMap<(i64, String), Arc<HoldoutAssignment>>,
     assigners: HashMap<String, VariantAssigner>,
     hashes: HashMap<String, String>,
     audience_matcher: AudienceMatcher,
@@ -98,6 +139,7 @@ impl Context {
             rules_rev: 0,
             index: HashMap::new(),
             index_variables: HashMap::new(),
+            holdout_assignments: HashMap::new(),
             assigners: HashMap::new(),
             hashes: HashMap::new(),
             audience_matcher: AudienceMatcher::new(),
@@ -226,6 +268,13 @@ impl Context {
         self.data = data;
         let mut previous = std::mem::take(&mut self.index);
         self.index_variables.clear();
+        let holdouts_by_id: HashMap<i64, Arc<ExperimentData>> = self
+            .data
+            .holdouts
+            .iter()
+            .filter(|holdout| !holdout.split.is_empty())
+            .map(|holdout| (holdout.id, Arc::new(holdout.clone())))
+            .collect();
 
         for experiment in &self.data.experiments {
             let mut variables: Vec<HashMap<String, Value>> = Vec::new();
@@ -286,6 +335,14 @@ impl Context {
                 }
             };
 
+            let mut holdouts: Vec<Arc<ExperimentData>> = experiment
+                .holdout_ids
+                .iter()
+                .filter_map(|id| holdouts_by_id.get(id).cloned())
+                .collect();
+            holdouts.sort_by_key(|holdout| holdout.id);
+            holdouts.dedup_by_key(|holdout| holdout.id);
+
             self.index.insert(
                 experiment.name.clone(),
                 Experiment {
@@ -293,6 +350,7 @@ impl Context {
                     variables,
                     rules,
                     rules_rev,
+                    holdouts,
                 },
             );
         }
@@ -369,11 +427,11 @@ impl Context {
 
         self.units.insert(unit_type.to_string(), uid);
 
-        // A split rule resolved without this unit gave the full-on variant;
-        // with the unit now available it is re-randomized, but only while that
-        // variant is still unseen.
+        // A split rule or a covering holdout resolved without this unit is
+        // resolved again now that it is available, but only while the
+        // assignment is still unseen.
         self.assignments.retain(|_, a| {
-            !(a.rule.missing_unit
+            !((a.rule.missing_unit || a.holdouts.iter().any(|h| h.assignment.is_none()))
                 && !a.assignment.exposed
                 && a.assignment.unit_type.as_deref() == Some(unit_type))
         });
@@ -524,7 +582,7 @@ impl Context {
             if let Some(entry) = self.assignments.get_mut(experiment_name) {
                 entry.assignment.exposed = true;
             }
-            self.queue_exposure(experiment_name);
+            self.trigger_exposures(experiment_name);
         }
 
         Ok(variant)
@@ -571,29 +629,9 @@ impl Context {
         default_value: impl Into<Value>,
     ) -> Result<Value, String> {
         self.check_ready(true)?;
-        if let Some(experiment_names) = self.index_variables.get(key).cloned() {
-            for exp_name in experiment_names {
-                let cached = self.assign(&exp_name);
-                if let Some(variables) = &cached.assignment.variables {
-                    let a = &cached.assignment;
-                    let value = variables
-                        .get(key)
-                        .filter(|_| a.assigned || a.overridden || cached.rule.rule_override)
-                        .cloned();
-                    if !a.exposed {
-                        if let Some(entry) = self.assignments.get_mut(&exp_name) {
-                            entry.assignment.exposed = true;
-                        }
-                        self.queue_exposure(&exp_name);
-                    }
-
-                    if let Some(value) = value {
-                        return Ok(value);
-                    }
-                }
-            }
-        }
-        Ok(default_value.into())
+        Ok(self
+            .resolve_variable_value(key)
+            .unwrap_or_else(|| default_value.into()))
     }
 
     pub fn peek_variable_value(
@@ -602,20 +640,108 @@ impl Context {
         default_value: impl Into<Value>,
     ) -> Result<Value, String> {
         self.check_ready(true)?;
-        if let Some(experiment_names) = self.index_variables.get(key).cloned() {
-            for exp_name in experiment_names {
-                let cached = self.assign(&exp_name);
-                let a = &cached.assignment;
-                if let Some(variables) = &a.variables {
-                    if let Some(value) = variables.get(key) {
-                        if a.assigned || a.overridden || cached.rule.rule_override {
-                            return Ok(value.clone());
-                        }
-                    }
+        Ok(self
+            .peek_variable(key)
+            .unwrap_or_else(|| default_value.into()))
+    }
+
+    /// [`Self::resolve_variable_value`] without exposures, kept as its own
+    /// walk so a peek does not pay for the exposure bookkeeping.
+    fn peek_variable(&mut self, key: &str) -> Option<Value> {
+        let candidate_count = self.index_variables.get(key)?.len();
+        let mut suppressed_fallback: Option<String> = None;
+        for i in 0..candidate_count {
+            let exp_name = self.index_variables[key][i].clone();
+            let cached = self.assign(&exp_name);
+            let a = &cached.assignment;
+            let Some(variables) = &a.variables else {
+                continue;
+            };
+            if a.assigned || a.overridden || cached.rule.rule_override {
+                if let Some(value) = variables.get(key) {
+                    return Some(value.clone());
                 }
+            } else if cached.suppressed && suppressed_fallback.is_none() {
+                suppressed_fallback = Some(exp_name);
             }
         }
-        Ok(default_value.into())
+        self.control_value(suppressed_fallback?, key)
+    }
+
+    /// The value of `key` from the first experiment that assigns it. A
+    /// held-out unit reads the control value of the first suppressed
+    /// experiment instead of the caller's default when nothing else wins.
+    /// A panicking event logger is resumed only after the remaining
+    /// candidates have queued their exposures.
+    fn resolve_variable_value(&mut self, key: &str) -> Option<Value> {
+        let candidate_count = self.index_variables.get(key)?.len();
+        let mut suppressed_fallback: Option<String> = None;
+        let mut deferred_panic = None;
+        for i in 0..candidate_count {
+            let exp_name = self.index_variables[key][i].clone();
+            let cached = self.assign(&exp_name);
+            let a = &cached.assignment;
+            let Some(variables) = &a.variables else {
+                continue;
+            };
+            let wins = a.assigned || a.overridden || cached.rule.rule_override;
+            let value = if wins { variables.get(key) } else { None };
+            if a.exposed {
+                if let Some(value) = value {
+                    let value = value.clone();
+                    return Self::settle(deferred_panic, Some(value));
+                }
+            }
+            let fallback = !wins && cached.suppressed && suppressed_fallback.is_none();
+            if !a.exposed {
+                let value = value.cloned();
+                if let Some(entry) = self.assignments.get_mut(&exp_name) {
+                    entry.assignment.exposed = true;
+                }
+                if let Err(payload) = self.trigger_exposures_deferred(&exp_name) {
+                    deferred_panic.get_or_insert(payload);
+                }
+                if value.is_some() {
+                    return Self::settle(deferred_panic, value);
+                }
+            }
+            if fallback {
+                suppressed_fallback = Some(exp_name);
+            }
+        }
+        let fallback = suppressed_fallback.and_then(|name| self.control_value(name, key));
+        Self::settle(deferred_panic, fallback)
+    }
+
+    /// The first suppressed candidate's control value for `key`, cloned only
+    /// once nothing else has won.
+    fn control_value(&self, experiment_name: String, key: &str) -> Option<Value> {
+        self.assignments[&experiment_name]
+            .assignment
+            .variables
+            .as_ref()?
+            .get(key)
+            .cloned()
+    }
+
+    /// `value`, or the deferred logger panic resumed unchanged.
+    fn settle(
+        deferred_panic: Option<Box<dyn std::any::Any + Send>>,
+        value: Option<Value>,
+    ) -> Option<Value> {
+        if let Some(payload) = deferred_panic {
+            panic::resume_unwind(payload);
+        }
+        value
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn trigger_exposures_deferred(
+        &mut self,
+        experiment_name: &str,
+    ) -> Result<(), Box<dyn std::any::Any + Send>> {
+        panic::catch_unwind(AssertUnwindSafe(|| self.trigger_exposures(experiment_name)))
     }
 
     pub fn variable_keys(&self) -> Result<HashMap<String, Vec<String>>, String> {
@@ -810,6 +936,16 @@ impl Context {
         for name in to_remove {
             self.assignments.remove(&name);
         }
+        // Holdout coverage can only change here, so it is compared once per
+        // refresh and the result is checked on the next read instead of the
+        // pinned holdouts being compared on every read.
+        for (name, cached) in self.assignments.iter_mut() {
+            if let Some(exp) = self.index.get(name) {
+                if !(cached.holdouts.is_empty() && exp.holdouts.is_empty()) {
+                    cached.coverage_stale.store(true, Ordering::Relaxed);
+                }
+            }
+        }
         match serde_json::to_value(&self.data) {
             Ok(value) => self.log_event("refresh", Some(value)),
             Err(e) => {
@@ -918,7 +1054,12 @@ impl Context {
         let has_override = self.overrides.contains_key(experiment_name);
         let has_experiment = self.index.contains_key(experiment_name);
 
-        if let Some(cached) = self.assignments.get(experiment_name) {
+        // A refresh only flags a coverage change; it is compared here, on
+        // the next read, so a change a later refresh undoes is no change.
+        if let Some(cached) = self.assignments.get(experiment_name).filter(|cached| {
+            !cached.coverage_stale.load(Ordering::Relaxed)
+                || self.coverage_still_matches(experiment_name, cached)
+        }) {
             let a = &cached.assignment;
             if has_override {
                 if a.overridden && a.variant == self.overrides[experiment_name] {
@@ -934,6 +1075,9 @@ impl Context {
             } else if cached.rule.rule_override
                 || !has_custom
                 || self.cassignments[experiment_name] == a.variant
+                // A suppressed assignment is control whatever the custom
+                // assignment says, so a custom mismatch is not staleness.
+                || cached.suppressed
             {
                 let exp = &self.index[experiment_name];
                 if Self::experiment_matches(&exp.data, a)
@@ -958,6 +1102,14 @@ impl Context {
             }
         }
 
+        self.rebuild_assignment(experiment_name, has_custom, has_override);
+    }
+
+    /// The slow path of [`Self::refresh_assignment`], kept out of line so
+    /// the cache-hit check inlines into the read paths.
+    #[cold]
+    #[inline(never)]
+    fn rebuild_assignment(&mut self, experiment_name: &str, has_custom: bool, has_override: bool) {
         let exp_data_opt = self.index.get(experiment_name).map(|e| e.data.clone());
 
         let mut assignment = Assignment {
@@ -965,6 +1117,15 @@ impl Context {
             ..Default::default()
         };
         let mut rule_state = RuleState::default();
+
+        let holdouts = self.resolve_holdouts(experiment_name);
+        let suppressed = exp_data_opt.as_ref().is_some_and(|exp| {
+            holdouts.iter().any(|h| {
+                h.assignment
+                    .as_ref()
+                    .is_some_and(|a| is_held_out_by(a.variant, a.arm_count, exp.full_on_variant))
+            })
+        });
 
         if has_override {
             if let Some(ref exp_data) = exp_data_opt {
@@ -976,14 +1137,14 @@ impl Context {
             assignment.variant = self.overrides[experiment_name];
         } else if let Some(ref exp_data) = exp_data_opt {
             // A matching rule is an explicit, author-specified assignment, like
-            // an override: it wins over the audience, traffic and custom
-            // assignments. The rules are recorded for every assignment so a
-            // refresh that changes them can be detected.
+            // an override: it wins over holdout suppression and the audience,
+            // traffic and custom assignments. The rules are recorded for every
+            // assignment so a refresh that changes them can be detected.
             rule_state.rules_rev = self.index[experiment_name].rules_rev;
             rule_state.variant_count = exp_data.variants.len();
             let rule = self.resolve_rule(experiment_name, false);
 
-            if rule.is_none() && !exp_data.audience.is_empty() {
+            if rule.is_none() && !suppressed && !exp_data.audience.is_empty() {
                 let attrs = self.evaluation_attributes();
                 let result = self.audience_matcher.evaluate(&exp_data.audience, &attrs);
                 if let Some(matched) = result {
@@ -995,7 +1156,7 @@ impl Context {
                 rule_state.rule_override = true;
                 rule_state.missing_unit = missing_unit;
                 assignment.variant = variant;
-            } else if exp_data.audience_strict && assignment.audience_mismatch {
+            } else if suppressed || (exp_data.audience_strict && assignment.audience_mismatch) {
                 assignment.variant = 0;
             } else if exp_data.full_on_variant == 0 {
                 if let Some(ref unit_type) = exp_data.unit_type {
@@ -1063,7 +1224,9 @@ impl Context {
             let same_run = exp_data_opt
                 .as_ref()
                 .is_some_and(|exp| Self::experiment_matches(exp, &previous.assignment));
+            // The read that got here settled the coverage flag.
             if same_run
+                && !previous.coverage_stale.load(Ordering::Relaxed)
                 && previous.assignment.exposed
                 && previous.rule.rule_override
                 && rule_state.rule_override
@@ -1081,8 +1244,154 @@ impl Context {
             CachedAssignment {
                 assignment,
                 rule: rule_state,
+                suppressed,
+                holdouts,
+                coverage_stale: AtomicBool::new(false),
             },
         );
+    }
+
+    /// Pin the unit's arm in each holdout covering `experiment_name`. The
+    /// holdouts are drawn with the covered experiment's unit type; an entry
+    /// is `None` while that unit is missing.
+    fn resolve_holdouts(&mut self, experiment_name: &str) -> Vec<PinnedHoldout> {
+        let Some(exp) = self.index.get(experiment_name) else {
+            return Vec::new();
+        };
+        if exp.holdouts.is_empty() {
+            return Vec::new();
+        }
+        let holdouts = exp.holdouts.clone();
+        let unit_type = exp.data.unit_type.clone();
+        holdouts
+            .into_iter()
+            .map(|data| {
+                let assignment = unit_type
+                    .as_deref()
+                    .and_then(|unit_type| self.holdout_assignment(&data, unit_type));
+                PinnedHoldout { data, assignment }
+            })
+            .collect()
+    }
+
+    /// The unit's arm in `live` (the holdout as in the current data) for
+    /// `unit_type`, drawn once per holdout iteration: a same-iteration seed or
+    /// split edit keeps the arm, so an exposed unit never lands in a second
+    /// arm.
+    fn holdout_assignment(
+        &mut self,
+        live: &ExperimentData,
+        unit_type: &str,
+    ) -> Option<Arc<HoldoutAssignment>> {
+        let key = (live.id, unit_type.to_string());
+        if let Some(cached) = self.holdout_assignments.get(&key) {
+            if cached.iteration == live.iteration {
+                return Some(cached.clone());
+            }
+        }
+
+        let hash = self.unit_hash(unit_type)?;
+        let assigner = self
+            .assigners
+            .entry(unit_type.to_string())
+            .or_insert_with(|| VariantAssigner::new(&hash));
+        let assignment = Arc::new(HoldoutAssignment {
+            id: live.id,
+            iteration: live.iteration,
+            variant: assigner.assign(&live.split, live.seed_hi, live.seed_lo) as i32,
+            arm_count: live.split.len(),
+            unit_type: unit_type.to_string(),
+            exposed: AtomicBool::new(false),
+        });
+        self.holdout_assignments.insert(key, assignment.clone());
+        Some(assignment)
+    }
+
+    /// Settle a refresh's coverage flag: `true` (and the flag cleared) when
+    /// the experiment is still covered by the same holdouts.
+    #[cold]
+    fn coverage_still_matches(&self, experiment_name: &str, cached: &CachedAssignment) -> bool {
+        #[cfg(test)]
+        COVERAGE_COMPARISONS.with(|n| n.set(n.get() + 1));
+        let matches = match self.index.get(experiment_name) {
+            Some(exp) => Self::holdout_set_matches(&exp.holdouts, &cached.holdouts),
+            None => true,
+        };
+        cached.coverage_stale.store(!matches, Ordering::Relaxed);
+        matches
+    }
+
+    /// Holdout coverage is compared by (id, iteration) only: a seed or split
+    /// edit must not re-resolve, and so re-expose, the experiment.
+    fn holdout_set_matches(fresh: &[Arc<ExperimentData>], pinned: &[PinnedHoldout]) -> bool {
+        fresh.len() == pinned.len()
+            && fresh
+                .iter()
+                .zip(pinned)
+                .all(|(f, p)| f.id == p.data.id && f.iteration == p.data.iteration)
+    }
+
+    /// Queue the experiment's exposure (unless it is held out) and the
+    /// exposures of the holdouts pinned in its assignment that this unit
+    /// has not seen yet. As in the JS SDK, each exposure is queued before
+    /// the event logger sees it.
+    fn trigger_exposures(&mut self, experiment_name: &str) {
+        let Some(cached) = self.assignments.get(experiment_name) else {
+            return;
+        };
+        let now = now_millis();
+        let first = self.exposures.len();
+        if !cached.suppressed || cached.assignment.overridden || cached.rule.rule_override {
+            let a = &cached.assignment;
+            self.exposures.push(Exposure {
+                id: a.id,
+                name: experiment_name.to_string(),
+                exposed_at: now,
+                unit: a.unit_type.clone(),
+                variant: a.variant,
+                assigned: a.assigned,
+                eligible: a.eligible,
+                overridden: a.overridden,
+                full_on: a.full_on,
+                custom: a.custom,
+                audience_mismatch: a.audience_mismatch,
+                rule_override: cached.rule.rule_override,
+            });
+        }
+        for holdout in &cached.holdouts {
+            let Some(h) = &holdout.assignment else {
+                continue;
+            };
+            if !h.exposed.swap(true, Ordering::Relaxed) {
+                self.exposures.push(Exposure {
+                    id: h.id,
+                    name: holdout.data.name.clone(),
+                    exposed_at: now,
+                    unit: Some(h.unit_type.clone()),
+                    variant: h.variant,
+                    assigned: true,
+                    eligible: true,
+                    overridden: false,
+                    full_on: false,
+                    custom: false,
+                    audience_mismatch: false,
+                    rule_override: false,
+                });
+            }
+        }
+
+        self.pending += self.exposures.len() - first;
+        for i in first..self.exposures.len() {
+            match serde_json::to_value(&self.exposures[i]) {
+                Ok(value) => self.log_event("exposure", Some(value)),
+                Err(e) => {
+                    error!(
+                        "Failed to serialize exposure for experiment '{}': {}",
+                        self.exposures[i].name, e
+                    );
+                }
+            }
+        }
     }
 
     /// Resolve the experiment's assignment rules to `(variant, missing_unit)`,
@@ -1160,7 +1469,8 @@ impl Context {
     }
 
     fn audience_matches(&self, experiment: &ExperimentData, cached: &CachedAssignment) -> bool {
-        if cached.rule.rule_override {
+        // A held-out unit never had its audience evaluated.
+        if cached.rule.rule_override || cached.suppressed {
             return true;
         }
         let assignment = &cached.assignment;
@@ -1172,38 +1482,6 @@ impl Context {
             }
         }
         true
-    }
-
-    fn queue_exposure(&mut self, experiment_name: &str) {
-        if let Some(cached) = self.assignments.get(experiment_name) {
-            let assignment = &cached.assignment;
-            let exposure = Exposure {
-                id: assignment.id,
-                name: experiment_name.to_string(),
-                exposed_at: now_millis(),
-                unit: assignment.unit_type.clone(),
-                variant: assignment.variant,
-                assigned: assignment.assigned,
-                eligible: assignment.eligible,
-                overridden: assignment.overridden,
-                full_on: assignment.full_on,
-                custom: assignment.custom,
-                audience_mismatch: assignment.audience_mismatch,
-                rule_override: cached.rule.rule_override,
-            };
-
-            match serde_json::to_value(&exposure) {
-                Ok(value) => self.log_event("exposure", Some(value)),
-                Err(e) => {
-                    error!(
-                        "Failed to serialize exposure for experiment '{}': {}",
-                        experiment_name, e
-                    );
-                }
-            }
-            self.exposures.push(exposure);
-            self.pending += 1;
-        }
     }
 
     fn unit_hash(&mut self, unit_type: &str) -> Option<String> {
@@ -1289,6 +1567,11 @@ impl Context {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static COVERAGE_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1298,6 +1581,10 @@ fn now_millis() -> i64 {
             0
         })
 }
+
+#[cfg(test)]
+#[path = "context_holdout_tests.rs"]
+mod holdout_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1332,11 +1619,16 @@ mod tests {
             variables: HashMap::new(),
             custom_field_values: None,
             assignment_rules: String::new(),
+            holdout_ids: vec![],
+            holdout_type: None,
         }
     }
 
     fn make_context_data(experiments: Vec<ExperimentData>) -> ContextData {
-        ContextData { experiments }
+        ContextData {
+            experiments,
+            holdouts: vec![],
+        }
     }
 
     #[test]
@@ -1854,6 +2146,8 @@ mod tests {
             variables: HashMap::new(),
             custom_field_values: None,
             assignment_rules: String::new(),
+            holdout_ids: vec![],
+            holdout_type: None,
         }
     }
 

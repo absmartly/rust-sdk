@@ -41,7 +41,8 @@ fn parse_request(raw: &str) -> Captured {
     let mut cap = Captured::default();
     let header_end = raw.find("\r\n\r\n").unwrap_or(raw.len());
     let (head, body) = raw.split_at(header_end);
-    cap.body = body.trim_start_matches("\r\n\r\n").to_string();
+    // Drop exactly the header separator so every body byte is kept.
+    cap.body = body.strip_prefix("\r\n\r\n").unwrap_or(body).to_string();
 
     let mut lines = head.split("\r\n");
     if let Some(request_line) = lines.next() {
@@ -101,14 +102,18 @@ async fn read_full_request(stream: &mut tokio::net::TcpStream) -> String {
 /// Start the mock server. Returns the base URL ("http://127.0.0.1:<port>")
 /// and the shared request log.
 async fn start_mock_server() -> (String, Log) {
+    // A single full-on experiment so a treatment produces a real exposure that
+    // ends up in the publish body. unit_type matches the unit we set below.
+    let get_body = r#"{"experiments":[{"id":1,"name":"exp_test","unitType":"session_id","iteration":1,"fullOnVariant":1,"trafficSplit":[0.0,1.0],"split":[0.5,0.5],"variants":[{"config":null},{"config":null}],"variables":{}}]}"#;
+
+    start_mock_server_with_body(get_body.to_string()).await
+}
+
+async fn start_mock_server_with_body(get_body: String) -> (String, Log) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base = format!("http://{}", addr);
     let log: Log = Arc::new(Mutex::new(Vec::new()));
-
-    // A single full-on experiment so a treatment produces a real exposure that
-    // ends up in the publish body. unit_type matches the unit we set below.
-    let get_body = r#"{"experiments":[{"id":1,"name":"exp_test","unitType":"session_id","iteration":1,"fullOnVariant":1,"trafficSplit":[0.0,1.0],"split":[0.5,0.5],"variants":[{"config":null},{"config":null}],"variables":{}}]}"#;
 
     let log_clone = log.clone();
     tokio::spawn(async move {
@@ -187,7 +192,14 @@ async fn real_http_get_and_put_against_local_server() {
     );
 
     // ---- 2. PUT /context (real HTTP publish, awaitable) ----
-    let params = context.get_publish_params();
+    let mut params = context.get_publish_params();
+    params.published_at = 0;
+    for exposure in params.exposures.iter_mut().flatten() {
+        exposure.exposed_at = 0;
+    }
+    for goal in params.goals.iter_mut().flatten() {
+        goal.achieved_at = 0;
+    }
     sdk.publish(&params).await.expect("publish should succeed");
 
     // ---------- Assertions on what the server actually received ----------
@@ -250,6 +262,19 @@ async fn real_http_get_and_put_against_local_server() {
     );
     let agent = put.header("X-Agent").expect("PUT must carry an X-Agent");
     assert_eq!(agent, absmartly::SDK_AGENT);
+
+    // Pin the actual request encoder, not just direct PublishParams serialization.
+    let uid = params.units[0].uid.as_ref().unwrap();
+    let expected = concat!(
+        "{\"publishedAt\":0,\"units\":[{\"type\":\"session_id\",\"uid\":",
+        "\"UID\"}],\"hashed\":true,\"exposures\":[{\"id\":1,\"name\":\"exp_test\",",
+        "\"exposedAt\":0,\"unit\":\"session_id\",\"variant\":1,\"assigned\":true,",
+        "\"eligible\":true,\"overridden\":false,\"fullOn\":true,\"custom\":false,",
+        "\"audienceMismatch\":false,\"ruleOverride\":false}],\"goals\":[{\"name\":\"payment\",",
+        "\"properties\":{\"value\":42},\"achievedAt\":0}]}"
+    )
+    .replace("UID", uid);
+    assert_eq!(put.body.as_bytes(), expected.as_bytes());
 
     // Body JSON fields required by the wire contract.
     let body: serde_json::Value =
@@ -330,4 +355,63 @@ async fn publish_returns_error_on_final_3xx_response() {
         .await
         .expect_err("a 304 publish response must be an error, not a panic");
     assert!(err.to_string().contains("304"), "unexpected error: {err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fetched_contexts_and_refresh_preserve_holdouts() {
+    let fixture = serde_json::json!({
+        "experiments": [{
+            "id": 1, "name": "covered", "unitType": "session_id", "iteration": 1,
+            "fullOnVariant": 1, "trafficSplit": [0.0, 1.0], "split": [0.5, 0.5],
+            "holdoutIds": [11],
+            "variants": [{"config": "{\"color\":\"control\"}"},
+                         {"config": "{\"color\":\"treatment\"}"}]
+        }],
+        "holdouts": [{
+            "id": 11, "name": "holdout", "unitType": "session_id", "iteration": 1,
+            "seedHi": 13, "seedLo": 111, "split": [1.0, 0.0],
+            "variants": [{"config": null}, {"config": null}]
+        }]
+    });
+    let (base, log) = start_mock_server_with_body(fixture.to_string()).await;
+    let sdk = Client::new(&base, "k", "www", "production").unwrap();
+    let units = [("session_id", "fetched-user")];
+    let ready = sdk.create_context(units, None).await.unwrap();
+    let or_failed = sdk.create_context_or_failed(units, None).await;
+    // Start without holdouts so refresh must introduce coverage, rather than
+    // merely retain an already-cached suppressed assignment.
+    let mut without_holdouts = fixture.clone();
+    without_holdouts["holdouts"] = serde_json::json!([]);
+    let mut refreshed = sdk.create_context_with(
+        units,
+        serde_json::from_value(without_holdouts).unwrap(),
+        None,
+    );
+    assert_eq!(refreshed.peek("covered").unwrap(), 1);
+    refreshed.refresh().unwrap();
+
+    for mut ctx in [ready, or_failed, refreshed] {
+        assert!(ctx.is_ready());
+        assert!(!ctx.is_failed());
+        assert_eq!(ctx.peek("covered").unwrap(), 0);
+        assert_eq!(
+            ctx.peek_variable_value("color", "default").unwrap(),
+            "control"
+        );
+        assert_eq!(ctx.pending(), 0);
+        assert_eq!(ctx.treatment("covered").unwrap(), 0);
+        assert_eq!(ctx.variable_value("color", "default").unwrap(), "control");
+        let exposures = ctx.get_publish_params().exposures.unwrap();
+        assert_eq!(exposures.len(), 1);
+        assert_eq!(exposures[0].id, 11);
+        assert_eq!(exposures[0].variant, 0);
+    }
+    assert_eq!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "GET")
+            .count(),
+        3
+    );
 }

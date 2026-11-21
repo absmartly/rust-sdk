@@ -1,0 +1,786 @@
+[
+  {
+    "publishedAt": 0,
+    "units": [
+      {
+        "type": "session_id",
+        "uid": "W38zvkjxnCXhry-Wz_xWnw"
+      }
+    ],
+    "hashed": true,
+    "exposures": [
+      {
+        "id": 1,
+        "name": "exp_a",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 1,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 2,
+        "name": "exp_b",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 2,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": true,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 3,
+        "name": "exp_c",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 0,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 4,
+        "name": "exp_d",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 1,
+        "assigned": false,
+        "eligible": true,
+        "overridden": true,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 0,
+        "name": "missing",
+        "exposedAt": 0,
+        "unit": null,
+        "variant": 0,
+        "assigned": false,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      }
+    ],
+    "goals": [
+      {
+        "name": "goal",
+        "properties": {
+          "amount": 1
+        },
+        "achievedAt": 0
+      }
+    ],
+    "attributes": [
+      {
+        "name": "age",
+        "value": 25,
+        "setAt": 0
+      }
+    ]
+  },
+  {
+    "publishedAt": 0,
+    "units": [
+      {
+        "type": "session_id",
+        "uid": "XPMq_jggnplt8uEw2p--2w"
+      }
+    ],
+    "hashed": true,
+    "exposures": [
+      {
+        "id": 1,
+        "name": "exp_a",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 2,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 2,
+        "name": "exp_b",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 2,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": true,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 3,
+        "name": "exp_c",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 2,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 4,
+        "name": "exp_d",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 1,
+        "assigned": false,
+        "eligible": true,
+        "overridden": true,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 0,
+        "name": "missing",
+        "exposedAt": 0,
+        "unit": null,
+        "variant": 0,
+        "assigned": false,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      }
+    ],
+    "goals": [
+      {
+        "name": "goal",
+        "properties": {
+          "amount": 1
+        },
+        "achievedAt": 0
+      }
+    ],
+    "attributes": [
+      {
+        "name": "age",
+        "value": 25,
+        "setAt": 0
+      }
+    ]
+  },
+  {
+    "publishedAt": 0,
+    "units": [
+      {
+        "type": "session_id",
+        "uid": "1hMyBfmH6V5x2hanKuXtiA"
+      }
+    ],
+    "hashed": true,
+    "exposures": [
+      {
+        "id": 1,
+        "name": "exp_a",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 1,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 2,
+        "name": "exp_b",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 2,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": true,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 3,
+        "name": "exp_c",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 2,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 4,
+        "name": "exp_d",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 1,
+        "assigned": false,
+        "eligible": true,
+        "overridden": true,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 0,
+        "name": "missing",
+        "exposedAt": 0,
+        "unit": null,
+        "variant": 0,
+        "assigned": false,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      }
+    ],
+    "goals": [
+      {
+        "name": "goal",
+        "properties": {
+          "amount": 1
+        },
+        "achievedAt": 0
+      }
+    ],
+    "attributes": [
+      {
+        "name": "age",
+        "value": 25,
+        "setAt": 0
+      }
+    ]
+  },
+  {
+    "publishedAt": 0,
+    "units": [
+      {
+        "type": "session_id",
+        "uid": "ABEK-LQ5PvP3LFC-WzMr7A"
+      }
+    ],
+    "hashed": true,
+    "exposures": [
+      {
+        "id": 1,
+        "name": "exp_a",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 2,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 2,
+        "name": "exp_b",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 2,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": true,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 3,
+        "name": "exp_c",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 1,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 4,
+        "name": "exp_d",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 1,
+        "assigned": false,
+        "eligible": true,
+        "overridden": true,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 0,
+        "name": "missing",
+        "exposedAt": 0,
+        "unit": null,
+        "variant": 0,
+        "assigned": false,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      }
+    ],
+    "goals": [
+      {
+        "name": "goal",
+        "properties": {
+          "amount": 1
+        },
+        "achievedAt": 0
+      }
+    ],
+    "attributes": [
+      {
+        "name": "age",
+        "value": 25,
+        "setAt": 0
+      }
+    ]
+  },
+  {
+    "publishedAt": 0,
+    "units": [
+      {
+        "type": "session_id",
+        "uid": "EHBAdUyuRPY5lXcU-etXEQ"
+      }
+    ],
+    "hashed": true,
+    "exposures": [
+      {
+        "id": 1,
+        "name": "exp_a",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 1,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 2,
+        "name": "exp_b",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 2,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": true,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 3,
+        "name": "exp_c",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 1,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 4,
+        "name": "exp_d",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 1,
+        "assigned": false,
+        "eligible": true,
+        "overridden": true,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 0,
+        "name": "missing",
+        "exposedAt": 0,
+        "unit": null,
+        "variant": 0,
+        "assigned": false,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      }
+    ],
+    "goals": [
+      {
+        "name": "goal",
+        "properties": {
+          "amount": 1
+        },
+        "achievedAt": 0
+      }
+    ],
+    "attributes": [
+      {
+        "name": "age",
+        "value": 25,
+        "setAt": 0
+      }
+    ]
+  },
+  {
+    "publishedAt": 0,
+    "units": [
+      {
+        "type": "session_id",
+        "uid": "z80ghJXVZe9m59_5-Ydk2g"
+      }
+    ],
+    "hashed": true,
+    "exposures": [
+      {
+        "id": 1,
+        "name": "exp_a",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 0,
+        "assigned": true,
+        "eligible": false,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 2,
+        "name": "exp_b",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 2,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": true,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 3,
+        "name": "exp_c",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 0,
+        "assigned": true,
+        "eligible": false,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 4,
+        "name": "exp_d",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 1,
+        "assigned": false,
+        "eligible": true,
+        "overridden": true,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 0,
+        "name": "missing",
+        "exposedAt": 0,
+        "unit": null,
+        "variant": 0,
+        "assigned": false,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      }
+    ],
+    "goals": [
+      {
+        "name": "goal",
+        "properties": {
+          "amount": 1
+        },
+        "achievedAt": 0
+      }
+    ],
+    "attributes": [
+      {
+        "name": "age",
+        "value": 25,
+        "setAt": 0
+      }
+    ]
+  },
+  {
+    "publishedAt": 0,
+    "units": [
+      {
+        "type": "session_id",
+        "uid": "a7YeO3vOCTHaV00Z0dgsiA"
+      }
+    ],
+    "hashed": true,
+    "exposures": [
+      {
+        "id": 1,
+        "name": "exp_a",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 2,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 2,
+        "name": "exp_b",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 2,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": true,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 3,
+        "name": "exp_c",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 1,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 4,
+        "name": "exp_d",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 1,
+        "assigned": false,
+        "eligible": true,
+        "overridden": true,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 0,
+        "name": "missing",
+        "exposedAt": 0,
+        "unit": null,
+        "variant": 0,
+        "assigned": false,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      }
+    ],
+    "goals": [
+      {
+        "name": "goal",
+        "properties": {
+          "amount": 1
+        },
+        "achievedAt": 0
+      }
+    ],
+    "attributes": [
+      {
+        "name": "age",
+        "value": 25,
+        "setAt": 0
+      }
+    ]
+  },
+  {
+    "publishedAt": 0,
+    "units": [
+      {
+        "type": "session_id",
+        "uid": "LJcoohOLLyXp-J-Zvcz42w"
+      }
+    ],
+    "hashed": true,
+    "exposures": [
+      {
+        "id": 1,
+        "name": "exp_a",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 2,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 2,
+        "name": "exp_b",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 2,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": true,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 3,
+        "name": "exp_c",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 2,
+        "assigned": true,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 4,
+        "name": "exp_d",
+        "exposedAt": 0,
+        "unit": "session_id",
+        "variant": 1,
+        "assigned": false,
+        "eligible": true,
+        "overridden": true,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      },
+      {
+        "id": 0,
+        "name": "missing",
+        "exposedAt": 0,
+        "unit": null,
+        "variant": 0,
+        "assigned": false,
+        "eligible": true,
+        "overridden": false,
+        "fullOn": false,
+        "custom": false,
+        "audienceMismatch": false,
+        "ruleOverride": false
+      }
+    ],
+    "goals": [
+      {
+        "name": "goal",
+        "properties": {
+          "amount": 1
+        },
+        "achievedAt": 0
+      }
+    ],
+    "attributes": [
+      {
+        "name": "age",
+        "value": 25,
+        "setAt": 0
+      }
+    ]
+  }
+]

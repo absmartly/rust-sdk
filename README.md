@@ -14,7 +14,7 @@ Audiences now always evaluate against the client's `application` and `environmen
 
 **This changes assignment for running experiments.** A unit whose experiment has Audience enforced (`audienceStrict`) and an `environment` or `application` condition currently gets variant 0, because the SDK never supplied those attributes, so the condition never matched. After upgrading, that unit is randomised normally. Those experiments are broken today; this fixes them, but the assignment they produce will change.
 
-Custom assignment rules are applied: an experiment's `assignmentRules` are evaluated in order and the first matching rule wins over the audience, traffic allocation and custom assignments (`set_override()` still wins over every rule). See [Assignment Rules](#assignment-rules). Audiences and rule conditions also gained the `semver_eq`, `semver_gt`, `semver_gte`, `semver_lt` and `semver_lte` operators. The `X-Agent` header is now `absmartly-rust-sdk/<version>` (exported as `absmartly::SDK_AGENT`) instead of the configured agent; a configured `agent` is still sent as `User-Agent`. `Exposure` gained `rule_override` and `ExperimentData` gained `assignment_rules` (both wire fields, defaulted when absent from JSON), so code building these two structs literally must set them; `Assignment` is unchanged. See the [CHANGELOG](CHANGELOG.md).
+Custom assignment rules are applied: an experiment's `assignmentRules` are evaluated in order and the first matching rule wins over the audience, traffic allocation and custom assignments (`set_override()` still wins over every rule). See [Assignment Rules](#assignment-rules). Audiences and rule conditions also gained the `semver_eq`, `semver_gt`, `semver_gte`, `semver_lt` and `semver_lte` operators. The `X-Agent` header is now `absmartly-rust-sdk/<version>` (exported as `absmartly::SDK_AGENT`) instead of the configured agent; a configured `agent` is still sent as `User-Agent`. `Exposure` gained `rule_override` and `ExperimentData` gained `assignment_rules` (both wire fields, defaulted when absent from JSON), so code building these two structs literally must set them; `Assignment` is unchanged. Holdouts are resolved (see [Holdouts](#holdouts)): `ContextData` gained `holdouts` and `ExperimentData` gained `holdout_ids` and `holdout_type`, also defaulted when absent from JSON, so literal `ContextData { .. }` and `ExperimentData { .. }` must set them too (`holdouts: vec![]`, `holdout_ids: vec![]`, `holdout_type: None`), and exhaustive destructuring patterns need `..`. See the [CHANGELOG](CHANGELOG.md).
 
 The ABsmartly Rust SDK is compatible with Rust 2021 edition and later. It uses async/await with [tokio](https://tokio.rs/) for network operations and provides a synchronous interface for variant assignment and goal tracking.
 
@@ -253,6 +253,18 @@ Experiments can carry assignment rules, configured in the Web Console. They are 
 - a `split` rule randomizes the unit over its own percentages (for example `"20/80"`). Until the experiment's unit is set, it gives the full-on variant; setting the unit re-randomizes it unless that variant was already exposed.
 
 A matching rule wins over the audience, traffic allocation and custom assignments, and its exposures are flagged `rule_override` so they can be excluded from analysis. `set_override()` still wins over every rule. If the first matching rule's variant is out of range, or its split does not have one percentage per variant, normal assignment applies. Changing an attribute, or a refresh that changes the rules, re-evaluates them.
+
+### Holdouts
+
+A holdout keeps a share of units out of every experiment it covers, so their long-term effect can be measured. Holdouts come in the context data (`holdouts`), and each experiment lists the holdouts covering it in `holdoutIds`; there is nothing to configure in the SDK.
+
+For a covered experiment, the unit is drawn into an arm of each covering holdout, using the experiment's unit type:
+
+- arm 0 holds the unit out;
+- in a three-arm holdout (`all_full_on`, recognised by its three-way split), arm 1 holds the unit out of experiments that are not full-on, while full-on experiments assign normally;
+- any other arm leaves the experiment to assign normally.
+
+If any covering holdout holds the unit out, `treatment()` and `peek()` return variant 0, variables read the control variant's values, and the experiment queues no exposure of its own. Each covering holdout queues its own exposure (with the unit's arm as the variant) once per context and unit type, the first time a covered experiment is exposed, whether or not the unit was held out. `set_override()` and a matching assignment rule both win over a holdout, but the holdout's exposure is still queued. A unit's arm stays the same for the life of the context unless the holdout's iteration changes, and a refresh that changes which holdouts cover an experiment re-assigns it. Holdout ids with no matching holdout, and holdouts without a split, are ignored.
 
 ### Custom Assignments
 
