@@ -39,9 +39,11 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   unit-experiment exposure flags; holdouts never apply to a switchback. Each
   period is exposed once, stamped with the time that chose it (or, when a
   cluster attribute changed since the period's cluster was read, with the time
-  it was read, so the Collector re-resolves the same cluster). Switchback
-  support itself does not change how payloads without switchbacks assign or
-  publish. The `switchbackClusters` order is kept when the data is decoded
+  it was read, so the Collector re-resolves the same cluster). Changing a
+  cluster attribute mid-period, before the period is exposed, is unsupported:
+  callers must set cluster attributes before a period's first read, and a
+  change takes effect from the next period. Switchback support itself does
+  not change how payloads without switchbacks assign or publish. The `switchbackClusters` order is kept when the data is decoded
   from JSON text or bytes, not through a `serde_json::Value` (which sorts
   object keys).
 - `absmartly::switchback` with the platform's switchback draw:
