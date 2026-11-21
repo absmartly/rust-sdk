@@ -2209,6 +2209,19 @@ fn malformed_holdouts_degrade_only_themselves() {
         assert_eq!(ctx.treatment("exp_plain").unwrap(), NORMAL_VARIANT);
     }
 
+    // A holdout without an id is dropped, not read as holdout 0.
+    let mut no_id = holdout(11, "holdout_a", HOLDOUT_A);
+    no_id.as_object_mut().unwrap().remove("id");
+    let mut ctx = context(
+        UID,
+        data(
+            vec![no_id],
+            vec![covered_by(experiment(1, "exp_covered"), &[0])],
+        ),
+    );
+    assert_eq!(ctx.treatment("exp_covered").unwrap(), NORMAL_VARIANT);
+    assert_eq!(ctx.pending(), 1);
+
     let mut covered = experiment(1, "exp_covered");
     covered["holdoutIds"] = json!(["11", 11.0, null, {"id": 11}, 1.5]);
     let mut ctx = context(UID, single_holdout(HOLDOUT_A, vec![covered]));
