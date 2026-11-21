@@ -2113,10 +2113,15 @@ fn unknown_fields_in_holdouts_are_ignored() {
 
 #[test]
 fn malformed_holdouts_degrade_only_themselves() {
-    for holdouts in [
-        json!({"not": "an array"}),
-        json!("nope"),
-        json!([{"id": "eleven"}, holdout(11, "holdout_a", HOLDOUT_A)]),
+    // The expected verdict comes from the input, not the decoder: only the
+    // mixed list still carries a valid holdout 11, which must hold UID out.
+    for (holdouts, expected) in [
+        (json!({"not": "an array"}), NORMAL_VARIANT),
+        (json!("nope"), NORMAL_VARIANT),
+        (
+            json!([{"id": "eleven"}, holdout(11, "holdout_a", HOLDOUT_A)]),
+            0,
+        ),
     ] {
         let data: ContextData = serde_json::from_value(json!({
             "experiments": [
@@ -2126,9 +2131,7 @@ fn malformed_holdouts_degrade_only_themselves() {
             "holdouts": holdouts
         }))
         .unwrap();
-        let has_holdout = !data.holdouts.is_empty();
         let mut ctx = context(UID, data);
-        let expected = if has_holdout { 0 } else { NORMAL_VARIANT };
         assert_eq!(ctx.treatment("exp_covered").unwrap(), expected);
         assert_eq!(ctx.treatment("exp_plain").unwrap(), NORMAL_VARIANT);
     }

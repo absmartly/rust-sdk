@@ -41,7 +41,8 @@ fn parse_request(raw: &str) -> Captured {
     let mut cap = Captured::default();
     let header_end = raw.find("\r\n\r\n").unwrap_or(raw.len());
     let (head, body) = raw.split_at(header_end);
-    cap.body = body.trim_start_matches("\r\n\r\n").to_string();
+    // Drop exactly the header separator so every body byte is kept.
+    cap.body = body.strip_prefix("\r\n\r\n").unwrap_or(body).to_string();
 
     let mut lines = head.split("\r\n");
     if let Some(request_line) = lines.next() {

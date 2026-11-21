@@ -649,7 +649,7 @@ impl Context {
     /// walk so a peek does not pay for the exposure bookkeeping.
     fn peek_variable(&mut self, key: &str) -> Option<Value> {
         let candidate_count = self.index_variables.get(key)?.len();
-        let mut suppressed_fallback: Option<Option<Value>> = None;
+        let mut suppressed_fallback: Option<String> = None;
         for i in 0..candidate_count {
             let exp_name = self.index_variables[key][i].clone();
             let cached = self.assign(&exp_name);
@@ -662,10 +662,10 @@ impl Context {
                     return Some(value.clone());
                 }
             } else if cached.suppressed && suppressed_fallback.is_none() {
-                suppressed_fallback = Some(variables.get(key).cloned());
+                suppressed_fallback = Some(exp_name);
             }
         }
-        suppressed_fallback.flatten()
+        self.control_value(suppressed_fallback?, key)
     }
 
     /// The value of `key` from the first experiment that assigns it. A
@@ -675,7 +675,7 @@ impl Context {
     /// candidates have queued their exposures.
     fn resolve_variable_value(&mut self, key: &str) -> Option<Value> {
         let candidate_count = self.index_variables.get(key)?.len();
-        let mut suppressed_fallback: Option<Option<Value>> = None;
+        let mut suppressed_fallback: Option<String> = None;
         let mut deferred_panic = None;
         for i in 0..candidate_count {
             let exp_name = self.index_variables[key][i].clone();
@@ -693,7 +693,7 @@ impl Context {
                 }
             }
             if !wins && cached.suppressed && suppressed_fallback.is_none() {
-                suppressed_fallback = Some(variables.get(key).cloned());
+                suppressed_fallback = Some(exp_name.clone());
             }
             if !a.exposed {
                 let value = value.cloned();
@@ -708,7 +708,19 @@ impl Context {
                 }
             }
         }
-        Self::settle(deferred_panic, suppressed_fallback.flatten())
+        let fallback = suppressed_fallback.and_then(|name| self.control_value(name, key));
+        Self::settle(deferred_panic, fallback)
+    }
+
+    /// The first suppressed candidate's control value for `key`, cloned only
+    /// once nothing else has won.
+    fn control_value(&self, experiment_name: String, key: &str) -> Option<Value> {
+        self.assignments[&experiment_name]
+            .assignment
+            .variables
+            .as_ref()?
+            .get(key)
+            .cloned()
     }
 
     /// `value`, or the deferred logger panic resumed unchanged.
