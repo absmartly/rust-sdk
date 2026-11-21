@@ -1703,6 +1703,26 @@ fn throwing_logger_does_not_strand_later_variable_candidates_holdout_exposure() 
 }
 
 #[test]
+fn deferred_logger_panic_is_resumed_when_an_exposed_candidate_wins() {
+    let held_out = covered_by(
+        with_variables(experiment(1, "exp_var_held_out"), "k"),
+        &[11],
+    );
+    let winner = with_config(
+        experiment(2, "exp_var_exposed_winner"),
+        1,
+        json!({"k": "won"}),
+    );
+    let mut ctx = context(UID, single_holdout(HOLDOUT_A, vec![held_out, winner]));
+    ctx.treatment("exp_var_exposed_winner").unwrap();
+    ctx.set_event_logger(panicking_logger(11, Arc::new(AtomicBool::new(true))));
+
+    let result = catch_unwind(AssertUnwindSafe(|| ctx.variable_value("k", "default")));
+
+    assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
+}
+
+#[test]
 fn throwing_logger_on_variable_winner_still_stops_the_candidate_walk() {
     let winner = with_config(
         experiment(1, "exp_var_panic_winner"),

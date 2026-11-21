@@ -152,6 +152,33 @@ fn warmed_reads_of_covered_experiments_do_not_allocate() {
     }
 }
 
+// A warmed variable read clones only the candidate it visits, not every
+// experiment listed for the key.
+#[test]
+fn warmed_variable_reads_do_not_clone_every_candidate() {
+    let experiments: Vec<_> = (1..=8)
+        .map(|id| {
+            json!({
+                "id": id, "name": format!("exp_{id}"), "unitType": "session_id", "iteration": 1,
+                "trafficSplit": [0.0, 1.0], "split": [0.0, 1.0], "seedHi": 3, "seedLo": 4,
+                "variants": [{"config": "{\"k\":0}"}, {"config": "{\"k\":1}"}]
+            })
+        })
+        .collect();
+    let data: ContextData = serde_json::from_value(json!({ "experiments": experiments })).unwrap();
+    let mut ctx = Context::new(data);
+    ctx.set_unit("session_id", "u").unwrap();
+    assert_eq!(ctx.variable_value("k", 9).unwrap(), json!(1));
+
+    let n = allocations_during(|| {
+        for _ in 0..100 {
+            assert_eq!(ctx.peek_variable_value("k", 9).unwrap(), json!(1));
+            assert_eq!(ctx.variable_value("k", 9).unwrap(), json!(1));
+        }
+    });
+    assert!(n <= 200, "{n} allocations for 200 reads");
+}
+
 #[test]
 fn reads_after_a_refresh_that_adds_a_variant_do_not_allocate() {
     let rules = large_rules_ending_with(json!({"type": "assign", "variant": 1}));
