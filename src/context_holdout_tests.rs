@@ -1713,13 +1713,66 @@ fn deferred_logger_panic_is_resumed_when_an_exposed_candidate_wins() {
         1,
         json!({"k": "won"}),
     );
-    let mut ctx = context(UID, single_holdout(HOLDOUT_A, vec![held_out, winner]));
+    // Unexposed and eligible: walking past the winner would queue it.
+    let later = with_config(
+        experiment(3, "exp_var_after_winner"),
+        1,
+        json!({"k": "later"}),
+    );
+    let mut ctx = context(
+        UID,
+        single_holdout(HOLDOUT_A, vec![held_out, winner, later]),
+    );
     ctx.treatment("exp_var_exposed_winner").unwrap();
-    ctx.set_event_logger(panicking_logger(11, Arc::new(AtomicBool::new(true))));
+    let armed = Arc::new(AtomicBool::new(true));
+    ctx.set_event_logger(panicking_logger(11, armed.clone()));
 
     let result = catch_unwind(AssertUnwindSafe(|| ctx.variable_value("k", "default")));
 
     assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
+    armed.store(false, Ordering::Relaxed);
+    assert_eq!(
+        queued(&mut ctx),
+        vec![
+            normal(2, "exp_var_exposed_winner", NORMAL_VARIANT),
+            holdout_exposure(11, "holdout_a", 0)
+        ]
+    );
+}
+
+#[test]
+fn first_deferred_logger_panic_is_the_one_resumed() {
+    let first = covered_by(
+        with_variables(experiment(1, "exp_var_first_panic"), "k"),
+        &[11],
+    );
+    let second = covered_by(
+        with_variables(experiment(2, "exp_var_second_panic"), "k"),
+        &[12],
+    );
+    let mut ctx = context(
+        UID,
+        data(
+            vec![
+                holdout(11, "holdout_a", HOLDOUT_A),
+                holdout(12, "holdout_c", HOLDOUT_A),
+            ],
+            vec![first, second],
+        ),
+    );
+    ctx.set_event_logger(Box::new(|_, event, data| {
+        if event == "exposure" {
+            match data.as_ref().and_then(|d| d["id"].as_i64()) {
+                Some(11) => panic!("first"),
+                Some(12) => panic!("second"),
+                _ => {}
+            }
+        }
+    }));
+
+    let result = catch_unwind(AssertUnwindSafe(|| ctx.variable_value("k", "default")));
+
+    assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"first"));
 }
 
 #[test]
@@ -2607,9 +2660,17 @@ fn numeric_holdout_seeds_follow_js_touint32() {
         (json!(1e20), 1_661_992_960),
         (json!(9007199254740993u64), 0),
     ] {
-        let mut h = holdout(11, "h", (0, 0));
-        h["seedLo"] = input.clone();
-        let decoded = data(vec![h], vec![]);
-        assert_eq!(decoded.holdouts[0].seed_lo, expected, "{input}");
+        for (field, other) in [("seedHi", "seedLo"), ("seedLo", "seedHi")] {
+            let mut h = holdout(11, "h", (0, 0));
+            h[field] = input.clone();
+            h[other] = json!(7);
+            let decoded = &data(vec![h], vec![]).holdouts[0];
+            let (seed, other_seed) = if field == "seedHi" {
+                (decoded.seed_hi, decoded.seed_lo)
+            } else {
+                (decoded.seed_lo, decoded.seed_hi)
+            };
+            assert_eq!((seed, other_seed), (expected, 7), "{field}: {input}");
+        }
     }
 }

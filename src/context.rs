@@ -692,9 +692,7 @@ impl Context {
                     return Self::settle(deferred_panic, Some(value));
                 }
             }
-            if !wins && cached.suppressed && suppressed_fallback.is_none() {
-                suppressed_fallback = Some(exp_name.clone());
-            }
+            let fallback = !wins && cached.suppressed && suppressed_fallback.is_none();
             if !a.exposed {
                 let value = value.cloned();
                 if let Some(entry) = self.assignments.get_mut(&exp_name) {
@@ -706,6 +704,9 @@ impl Context {
                 if value.is_some() {
                     return Self::settle(deferred_panic, value);
                 }
+            }
+            if fallback {
+                suppressed_fallback = Some(exp_name);
             }
         }
         let fallback = suppressed_fallback.and_then(|name| self.control_value(name, key));
