@@ -2258,6 +2258,10 @@ fn first_suppressed_candidate_decides_the_control_fallback() {
         ctx.peek_variable_value("color", "default").unwrap(),
         json!("default")
     );
+    assert_eq!(
+        ctx.variable_value("color", "default").unwrap(),
+        json!("default")
+    );
 }
 
 // JS sorts and de-duplicates the covering holdouts by id: exposures go out
@@ -2564,5 +2568,25 @@ fn overridden_or_rule_won_experiment_is_not_the_control_fallback() {
             json!("control"),
             "rule_won {rule_won}"
         );
+        assert_eq!(
+            ctx.variable_value("color", "default").unwrap(),
+            json!("control"),
+            "rule_won {rule_won}"
+        );
+    }
+}
+
+#[test]
+fn numeric_holdout_seeds_follow_js_touint32() {
+    for (input, expected) in [
+        (json!(1.9), 1),
+        (json!(-1.9), u32::MAX),
+        (json!(1e20), 1_661_992_960),
+        (json!(9007199254740993u64), 0),
+    ] {
+        let mut h = holdout(11, "h", (0, 0));
+        h["seedLo"] = input.clone();
+        let decoded = data(vec![h], vec![]);
+        assert_eq!(decoded.holdouts[0].seed_lo, expected, "{input}");
     }
 }

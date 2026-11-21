@@ -648,9 +648,10 @@ impl Context {
     /// [`Self::resolve_variable_value`] without exposures, kept as its own
     /// walk so a peek does not pay for the exposure bookkeeping.
     fn peek_variable(&mut self, key: &str) -> Option<Value> {
-        let experiment_names = self.index_variables.get(key)?.clone();
+        let candidate_count = self.index_variables.get(key)?.len();
         let mut suppressed_fallback: Option<Option<Value>> = None;
-        for exp_name in experiment_names {
+        for i in 0..candidate_count {
+            let exp_name = self.index_variables[key][i].clone();
             let cached = self.assign(&exp_name);
             let a = &cached.assignment;
             let Some(variables) = &a.variables else {
@@ -673,10 +674,11 @@ impl Context {
     /// A panicking event logger is resumed only after the remaining
     /// candidates have queued their exposures.
     fn resolve_variable_value(&mut self, key: &str) -> Option<Value> {
-        let experiment_names = self.index_variables.get(key)?.clone();
+        let candidate_count = self.index_variables.get(key)?.len();
         let mut suppressed_fallback: Option<Option<Value>> = None;
         let mut deferred_panic = None;
-        for exp_name in experiment_names {
+        for i in 0..candidate_count {
+            let exp_name = self.index_variables[key][i].clone();
             let cached = self.assign(&exp_name);
             let a = &cached.assignment;
             let Some(variables) = &a.variables else {

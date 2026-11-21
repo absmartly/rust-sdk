@@ -80,10 +80,12 @@ fn integral(value: &serde_json::Value) -> Option<i64> {
     })
 }
 
-/// A seed wrapped to 32 bits like JS's `>>> 0`; a non-integral value, or
-/// one beyond 2^53, reads as 0.
+/// Numeric seeds use JS's ToUint32: truncate and wrap modulo 2^32.
 fn seed(value: &serde_json::Value) -> u32 {
-    integral(value).map_or(0, |v| v as u32)
+    value
+        .as_f64()
+        .filter(|v| v.is_finite())
+        .map_or(0, |v| v.trunc().rem_euclid(4_294_967_296.0) as u32)
 }
 
 fn holdout_from_value(item: &serde_json::Value) -> Option<ExperimentData> {
