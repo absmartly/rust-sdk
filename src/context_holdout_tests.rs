@@ -2209,7 +2209,6 @@ fn malformed_holdouts_degrade_only_themselves() {
         assert_eq!(ctx.treatment("exp_plain").unwrap(), NORMAL_VARIANT);
     }
 
-    // A holdout without an id is dropped, not read as holdout 0.
     let mut no_id = holdout(11, "holdout_a", HOLDOUT_A);
     no_id.as_object_mut().unwrap().remove("id");
     let mut ctx = context(
@@ -2389,7 +2388,6 @@ fn holdout_ids_are_sorted_and_deduplicated() {
     );
 }
 
-// Moving coverage to another holdout id, same iteration, re-resolves.
 #[test]
 fn refresh_moving_coverage_to_another_holdout_re_resolves_experiment() {
     let holdouts = || {
@@ -2646,7 +2644,6 @@ fn overridden_or_rule_won_experiment_is_not_the_control_fallback() {
         } else {
             ctx.set_override("exp_first", 1).unwrap();
         }
-        // Make exp_first a candidate for `color` too, without the key.
         ctx.index_variables
             .get_mut("color")
             .unwrap()
