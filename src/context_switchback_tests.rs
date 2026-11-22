@@ -2083,6 +2083,27 @@ fn audience_change_rebuild_keeps_the_period_key_and_exposes_once() {
     assert_eq!(ctx.pending(), 1);
 }
 
+// A refresh that changes the experiment id under the same name is a new
+// identity: the period is resolved again, from the current cluster.
+#[test]
+fn refresh_with_a_new_experiment_id_rereads_the_cluster() {
+    let mut experiment = sb(2, HOUR);
+    experiment["switchbackClusters"] = json!({UNIT_TYPE: "city"});
+    let clock = Clock::new(ANCHOR + HOUR + 10);
+    let mut ctx = context(&clock, data_of(vec![experiment.clone()]));
+    ctx.set_attribute("city", "Lisboa").unwrap();
+    let lisboa = assign_switchback("Lisboa", 1, SEED, 2).unwrap() as i32;
+    let faro = assign_switchback("Faro", 1, SEED, 2).unwrap() as i32;
+    assert_ne!(lisboa, faro);
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), lisboa);
+
+    ctx.set_attribute("city", "Faro").unwrap();
+    experiment["id"] = json!(99);
+    ctx.refresh_with(data_of(vec![experiment]));
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), faro);
+    assert_eq!(ctx.pending(), 2);
+}
+
 // ---- ContextSwitchbackClusterTest ----
 
 const ARMS: usize = 3;
