@@ -357,6 +357,33 @@ async fn publish_returns_error_on_final_3xx_response() {
     assert!(err.to_string().contains("304"), "unexpected error: {err}");
 }
 
+/// The fetched context keeps the `switchbackClusters` order: the first
+/// declared unit (`z_unit`, not alphabetically first) serves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fetched_switchback_keeps_the_declared_cluster_order() {
+    let (base, _log) = start_mock_server_with_body(
+        r#"{"experiments":[{"id":7,"name":"sb","unitType":"a_unit","iteration":1,"split":[0.5,0.5],"trafficSplit":[0.0,1.0],"variants":[{"config":null},{"config":null}],"randomizationType":"switchback","switchbackClusters":{"z_unit":"city","a_unit":"city"},"switchbackStartAt":1704067200000,"switchbackPeriodMs":1440000000000}]}"#
+            .to_string(),
+    )
+    .await;
+    let sdk = Client::builder()
+        .endpoint(&base)
+        .api_key("k")
+        .application("www")
+        .environment("production")
+        .build()
+        .unwrap();
+    let mut context = sdk
+        .create_context([("a_unit", "a1"), ("z_unit", "z1")], None)
+        .await
+        .unwrap();
+    context.set_attribute("city", "Lisboa").unwrap();
+    context.treatment("sb").unwrap();
+    let exposures = context.get_publish_params().exposures.unwrap();
+    assert_eq!(exposures.len(), 1);
+    assert_eq!(exposures[0].unit.as_deref(), Some("z_unit"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fetched_contexts_and_refresh_preserve_holdouts() {
     let fixture = serde_json::json!({

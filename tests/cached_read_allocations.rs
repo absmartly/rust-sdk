@@ -6,7 +6,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use absmartly::{Context, ContextData};
-use serde_json::json;
+use serde_json::{json, Value};
 
 struct CountingAlloc;
 
@@ -152,6 +152,37 @@ fn warmed_reads_of_covered_experiments_do_not_allocate() {
     }
 }
 
+#[test]
+fn warmed_reads_of_switchbacks_do_not_allocate() {
+    let data: ContextData = serde_json::from_value(json!({"experiments": [{
+        "id": 1, "name": "sb", "unitType": "store_id", "iteration": 1,
+        "trafficSplit": [0.0, 1.0], "split": [0.5, 0.5], "seedHi": 3, "seedLo": 4,
+        "variants": [{"config": "{\"k\":0}"}, {"config": "{\"k\":1}"}],
+        "randomizationType": "switchback",
+        "switchbackClusters": {"store_id": "city"},
+        "switchbackStartAt": 1_704_067_200_000i64,
+        "switchbackPeriodMs": 1_440_000_000_000i64
+    }, {
+        "id": 2, "name": "unit", "unitType": "store_id", "iteration": 1,
+        "trafficSplit": [0.0, 1.0], "split": [0.5, 0.5], "seedHi": 3, "seedLo": 4,
+        "variants": [{"config": null}, {"config": null}]
+    }]}))
+    .unwrap();
+    let mut ctx = Context::new(data);
+    ctx.set_unit("store_id", "s1").unwrap();
+    ctx.set_attribute("city", "Lisboa").unwrap();
+    let variant = ctx.treatment("sb").unwrap();
+    let unit = ctx.treatment("unit").unwrap();
+    let n = allocations_during(|| {
+        for _ in 0..100 {
+            assert_eq!(ctx.peek("sb").unwrap(), variant);
+            assert_eq!(ctx.treatment("sb").unwrap(), variant);
+            assert_eq!(ctx.treatment("unit").unwrap(), unit);
+        }
+    });
+    assert_eq!(n, 0);
+}
+
 // A warmed variable read clones only the candidate it visits, not every
 // experiment listed for the key.
 #[test]
@@ -193,6 +224,58 @@ fn reads_after_a_refresh_that_adds_a_variant_do_not_allocate() {
         }
     });
     assert_eq!(n, 0);
+}
+
+/// A switchback slot revalidated with the same outcome is stamped, so later
+/// reads neither re-evaluate its rules nor allocate: after an unrelated
+/// attribute, after a refresh that keeps the rule outcome, and after one that
+/// adds a variant.
+#[test]
+fn switchback_reads_after_revalidation_do_not_allocate() {
+    let experiment = |rules: &str, variants: usize| {
+        json!({
+            "id": 1, "name": "sb", "unitType": "store_id", "iteration": 1,
+            "trafficSplit": [0.0, 1.0], "split": vec![1.0 / variants as f64; variants],
+            "seedHi": 3, "seedLo": 4,
+            "variants": vec![json!({"config": null}); variants],
+            "assignmentRules": rules,
+            "randomizationType": "switchback",
+            "switchbackClusters": {"store_id": "city"},
+            "switchbackStartAt": 1_704_067_200_000i64,
+            "switchbackPeriodMs": 1_440_000_000_000i64
+        })
+    };
+    // Large rules whose last, unconditional rule assigns variant 1, so adding
+    // a variant keeps the outcome.
+    let mut rules: Value = serde_json::from_str(&large_rules()).unwrap();
+    *rules["rules"].as_array_mut().unwrap().last_mut().unwrap() =
+        json!({"type": "assign", "variant": 1});
+    let rules = rules.to_string();
+    let data = |rules: &str, variants: usize| -> ContextData {
+        serde_json::from_value(json!({ "experiments": [experiment(rules, variants)] })).unwrap()
+    };
+    let mut ctx = Context::new(data(&rules, 2));
+    ctx.set_unit("store_id", "s1").unwrap();
+    ctx.set_attribute("city", "Lisboa").unwrap();
+    ctx.treatment("sb").unwrap();
+
+    let other_rules = rules.replace("t199", "t-other");
+    for step in 0..3 {
+        match step {
+            0 => ctx.set_attribute("unrelated", 1).unwrap(),
+            1 => ctx.refresh_with(data(&other_rules, 2)),
+            _ => ctx.refresh_with(data(&other_rules, 3)),
+        }
+        let variant = ctx.treatment("sb").unwrap();
+        assert_eq!(variant, 1);
+        let n = allocations_during(|| {
+            for _ in 0..100 {
+                assert_eq!(ctx.peek("sb").unwrap(), variant);
+                assert_eq!(ctx.treatment("sb").unwrap(), variant);
+            }
+        });
+        assert_eq!(n, 0, "step {}", step);
+    }
 }
 
 #[test]

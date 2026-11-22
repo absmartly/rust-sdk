@@ -27,11 +27,47 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   `set_override()` and a matching assignment rule win over a holdout.
   Holdout support itself does not change how payloads without holdouts
   assign or publish (exposures still gain `ruleOverride`; see Changed).
+- Switchback experiments, as in java-sdk (`SWITCHBACK.md`): an experiment
+  with `randomizationType: "switchback"` is served per cluster and period.
+  The first unit, in `switchbackClusters` order, whose attribute path gives a
+  value serves it, and that raw value (a non-empty string, or an integer as
+  its decimal text; never a float such as `3.0`) is the cluster key. The
+  variant is the platform's balanced-block draw for the period, pinned by its
+  golden vectors. Ineligible clusters give variant 0 with no exposure unless
+  overridden. Before `switchbackStartAt`, or with an unservable schedule,
+  there is no draw: overrides, assignment rules, strict audiences and full-on
+  still apply, and otherwise the result is variant 0 with no exposure.
+  Overrides, assignment rules, strict audiences, full-on, traffic and custom
+  assignments keep their unit-experiment exposure flags; holdouts never apply
+  to a switchback. Repeated reads of a period's cached assignment are exposed
+  once; a rebuild in the same period (a refresh or a custom assignment that
+  changes its inputs) can expose it again, as for unit experiments. A
+  same-period refresh that changes the number of variants draws the period
+  again, so a period never serves an arm the experiment no longer has. The
+  exposure is stamped with the time that chose the period (or, when a cluster
+  attribute changed since the period's cluster was read, with the time it was
+  read, so the Collector re-resolves the same cluster). Changing a cluster
+  attribute mid-period, before the period is exposed, is unsupported: callers
+  must set cluster attributes before a period's first read, and a change
+  takes effect from the next period. Switchback support itself does not
+  change how payloads without switchbacks assign or publish. The
+  `switchbackClusters` order is kept when the data is decoded from JSON text
+  or bytes; through a `serde_json::Value` it is the `Value`'s own order
+  (sorted keys, unless a dependency enables serde_json's `preserve_order`).
+- `absmartly::switchback` with the platform's switchback draw:
+  `assign_switchback`, `base_hash` and `fisher_yates_permutation`.
 
 ### Changed
 
 Breaking changes are listed against the released 0.1.0.
 
+- **Switchback experiments are assigned differently.** Before 0.2.0 the SDK
+  ignored the switchback fields and served such an experiment a sticky unit
+  assignment on its `unitType`, which did not follow the schedule. It now
+  serves the cluster's schedule (see *Added*), so units in a running
+  switchback can change variant each period. Repeated reads of a period's
+  cached assignment are exposed once; a rebuild in the same period can
+  expose it again.
 - Audiences and rule conditions always see the client's `application` and
   `environment`. Only non-empty values are used, and a user attribute with
   the same name overrides them. They are not added to the publish payload,
@@ -72,7 +108,13 @@ Breaking changes are listed against the released 0.1.0.
   and `rule_override: false`. `ContextData` gained `holdouts` and
   `ExperimentData` gained `holdout_ids` and `holdout_type` the same way
   (`holdouts: vec![]`, `holdout_ids: vec![]`, `holdout_type: None`);
-  exhaustive destructuring patterns need `..`.
+  exhaustive destructuring patterns need `..`. `ExperimentData` also gained
+  the switchback fields (`randomization_type`, `switchback_clusters`,
+  `switchback_cluster_values`, `switchback_start_at`, `switchback_period_ms`,
+  `switchback_carryover_duration_ms`, `switchback_burn_in_duration_ms`,
+  `switchback_burn_out_duration_ms`, `switchback_design_type`,
+  `switchback_estimand`), all `Option`s that default to `None`, and now
+  implements `Default`, so a literal can end with `..Default::default()`.
   `Assignment` is unchanged.
 - **BREAKING:** the crate is imported as `absmartly` instead of
   `absmartly_sdk` (the package is still `absmartly-sdk`).
