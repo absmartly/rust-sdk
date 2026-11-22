@@ -1661,6 +1661,11 @@ impl Context {
         {
             return true;
         }
+        // The draw, full-on and custom variants were chosen over the old
+        // arms; a rule-won variant is rechecked against the new count below.
+        if cached.rule.variant_count != variant_count && !cached.rule.rule_override {
+            return false;
+        }
         // Rules are consulted only for an eligible cluster.
         let rule_holds = match &state.serving {
             Serving::Eligible { unit_type, .. } => {

@@ -41,7 +41,9 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   assignments keep their unit-experiment exposure flags; holdouts never apply
   to a switchback. Repeated reads of a period's cached assignment are exposed
   once; a rebuild in the same period (a refresh or a custom assignment that
-  changes its inputs) can expose it again, as for unit experiments. The
+  changes its inputs) can expose it again, as for unit experiments. A
+  same-period refresh that changes the number of variants draws the period
+  again, so a period never serves an arm the experiment no longer has. The
   exposure is stamped with the time that chose the period (or, when a cluster
   attribute changed since the period's cluster was read, with the time it was
   read, so the Collector re-resolves the same cluster). Changing a cluster
@@ -63,7 +65,9 @@ Breaking changes are listed against the released 0.1.0.
   ignored the switchback fields and served such an experiment a sticky unit
   assignment on its `unitType`, which did not follow the schedule. It now
   serves the cluster's schedule (see *Added*), so units in a running
-  switchback can change variant and are exposed once per period.
+  switchback can change variant each period. Repeated reads of a period's
+  cached assignment are exposed once; a rebuild in the same period can
+  expose it again.
 - Audiences and rule conditions always see the client's `application` and
   `environment`. Only non-empty values are used, and a user attribute with
   the same name overrides them. They are not added to the publish payload,

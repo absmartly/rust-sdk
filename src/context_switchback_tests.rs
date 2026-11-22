@@ -3780,6 +3780,25 @@ fn refresh_removing_every_switchback_skips_the_switchback_lookup_again() {
     assert_eq!(ctx.switchback_lookups, before);
 }
 
+// A same-period refresh to fewer arms redraws the cached period, so it never
+// serves an arm the experiment no longer has.
+#[test]
+fn refresh_to_fewer_arms_redraws_the_period() {
+    let clock = Clock::new(ANCHOR + HOUR + 10);
+    let mut ctx = context(&clock, data_of(vec![sb(3, HOUR)]));
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), EXPECTED_3_ARMS[1]);
+    assert_eq!(EXPECTED_3_ARMS[1], 2);
+
+    ctx.refresh_with(data_of(vec![sb(2, HOUR)]));
+    assert_eq!(ctx.peek("exp_sb").unwrap(), EXPECTED_2_ARMS[1]);
+    assert_eq!(
+        ctx.variable_value("sb.arm", -1).unwrap(),
+        json!(EXPECTED_2_ARMS[1])
+    );
+    let variants: Vec<i32> = queued(&mut ctx).iter().map(|e| e.3).collect();
+    assert_eq!(variants, vec![2, EXPECTED_2_ARMS[1]]);
+}
+
 // A refresh drops the slots of a switchback it removes or replaces, without
 // waiting for a read of the old name, and keeps the others.
 #[test]
