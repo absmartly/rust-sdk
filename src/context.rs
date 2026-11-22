@@ -579,6 +579,16 @@ impl Context {
 
             self.index.insert(experiment.name.clone(), installed);
         }
+
+        // Slots of a switchback the data no longer installs, or installs
+        // with another identity, could only be dropped by a later read.
+        let index = &self.index;
+        self.switchbacks.retain(|name, epoch| {
+            index
+                .get(name)
+                .and_then(|exp| exp.switchback.as_ref())
+                .is_some_and(|def| def.generation == epoch.generation)
+        });
     }
 
     /// Like the JS SDK, a context whose load failed is still ready (with empty

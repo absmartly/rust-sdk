@@ -367,11 +367,11 @@ pub struct ExperimentData {
     ///
     /// The order survives decoding from JSON text or bytes
     /// (`serde_json::from_str`, `from_slice`, `from_reader`, and the
-    /// [`crate::Client`] fetch). A `serde_json::Value` object has already
-    /// sorted its keys (serde_json's `preserve_order` feature is off), so
-    /// `serde_json::from_value` sees them sorted and can serve another unit.
-    /// For the same reason the `ready` and `refresh` event data, which are
-    /// `Value`s, list the map sorted.
+    /// [`crate::Client`] fetch). `serde_json::from_value` sees the `Value`'s
+    /// own order instead: its objects sort their keys unless some crate in
+    /// the build enables serde_json's `preserve_order` feature, so it can
+    /// serve another unit. For the same reason the `ready` and `refresh`
+    /// event data, which are `Value`s, list the map in that order.
     #[serde(
         default,
         deserialize_with = "deserialize_switchback_clusters",

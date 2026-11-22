@@ -33,19 +33,25 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   value serves it, and that raw value (a non-empty string, or an integer as
   its decimal text; never a float such as `3.0`) is the cluster key. The
   variant is the platform's balanced-block draw for the period, pinned by its
-  golden vectors. Ineligible clusters, the time before `switchbackStartAt` and
-  unservable schedules give variant 0 with no exposure. Overrides, assignment
-  rules, strict audiences, full-on, traffic and custom assignments keep their
-  unit-experiment exposure flags; holdouts never apply to a switchback. Each
-  period is exposed once, stamped with the time that chose it (or, when a
-  cluster attribute changed since the period's cluster was read, with the time
-  it was read, so the Collector re-resolves the same cluster). Changing a
-  cluster attribute mid-period, before the period is exposed, is unsupported:
-  callers must set cluster attributes before a period's first read, and a
-  change takes effect from the next period. Switchback support itself does
-  not change how payloads without switchbacks assign or publish. The `switchbackClusters` order is kept when the data is decoded
-  from JSON text or bytes, not through a `serde_json::Value` (which sorts
-  object keys).
+  golden vectors. Ineligible clusters give variant 0 with no exposure unless
+  overridden. Before `switchbackStartAt`, or with an unservable schedule,
+  there is no draw: overrides, assignment rules, strict audiences and full-on
+  still apply, and otherwise the result is variant 0 with no exposure.
+  Overrides, assignment rules, strict audiences, full-on, traffic and custom
+  assignments keep their unit-experiment exposure flags; holdouts never apply
+  to a switchback. Repeated reads of a period's cached assignment are exposed
+  once; a rebuild in the same period (a refresh or a custom assignment that
+  changes its inputs) can expose it again, as for unit experiments. The
+  exposure is stamped with the time that chose the period (or, when a cluster
+  attribute changed since the period's cluster was read, with the time it was
+  read, so the Collector re-resolves the same cluster). Changing a cluster
+  attribute mid-period, before the period is exposed, is unsupported: callers
+  must set cluster attributes before a period's first read, and a change
+  takes effect from the next period. Switchback support itself does not
+  change how payloads without switchbacks assign or publish. The
+  `switchbackClusters` order is kept when the data is decoded from JSON text
+  or bytes; through a `serde_json::Value` it is the `Value`'s own order
+  (sorted keys, unless a dependency enables serde_json's `preserve_order`).
 - `absmartly::switchback` with the platform's switchback draw:
   `assign_switchback`, `base_hash` and `fisher_yates_permutation`.
 

@@ -3759,6 +3759,28 @@ fn refresh_removing_every_switchback_skips_the_switchback_lookup_again() {
     assert_eq!(ctx.switchback_lookups, before);
 }
 
+// A refresh drops the slots of a switchback it removes or replaces, without
+// waiting for a read of the old name, and keeps the others.
+#[test]
+fn refresh_drops_slots_of_retired_switchbacks() {
+    let clock = Clock::new(ANCHOR + 10);
+    let kept = switchback(2, "exp_other", 2, HOUR);
+    let mut ctx = context(&clock, data_of(vec![sb(2, HOUR), kept.clone()]));
+    ctx.treatment("exp_sb").unwrap();
+    ctx.treatment("exp_other").unwrap();
+    assert_eq!(ctx.switchbacks.len(), 2);
+
+    ctx.refresh_with(data_of(vec![kept.clone()]));
+    assert!(!ctx.switchbacks.contains_key("exp_sb"));
+    assert!(ctx.switchbacks.contains_key("exp_other"));
+    assert_eq!(ctx.pending(), 2);
+
+    let mut restarted = kept;
+    restarted["iteration"] = json!(2);
+    ctx.refresh_with(data_of(vec![restarted]));
+    assert!(ctx.switchbacks.is_empty());
+}
+
 // Every read API takes the unit fast path, never the generic switchback-aware
 // one, while the data has no switchback.
 #[test]
@@ -4097,8 +4119,8 @@ fn switchback_clusters_keep_their_declared_order() {
     );
 }
 
-// The order survives text decoding only: a serde_json::Value object sorts
-// its keys, so from_value serves the alphabetically first unit.
+// Text decoding keeps the declared order; from_value serves whichever unit
+// the Value's map lists first (sorted without `preserve_order`).
 #[test]
 fn cluster_order_survives_text_decoding_but_not_a_value() {
     let text = format!(
@@ -4115,6 +4137,15 @@ fn cluster_order_survives_text_decoding_but_not_a_value() {
     );
     let from_text: ContextData = serde_json::from_str(&text).unwrap();
     let value: Value = serde_json::from_str(&text).unwrap();
+    // The Value's own order: sorted, unless a dependency turns on
+    // serde_json's `preserve_order`.
+    let value_first = value["experiments"][0]["switchbackClusters"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
     let from_value: ContextData = serde_json::from_value(value).unwrap();
     let serving_unit = |data: ContextData| {
         let clock = Clock::new(NOW);
@@ -4128,7 +4159,7 @@ fn cluster_order_survives_text_decoding_but_not_a_value() {
         queued(&mut ctx)[0].2.clone()
     };
     assert_eq!(serving_unit(from_text).as_deref(), Some(USER));
-    assert_eq!(serving_unit(from_value).as_deref(), Some("device_id"));
+    assert_eq!(serving_unit(from_value), Some(value_first));
 }
 
 // A repeated key keeps its first position and its last path, as Jackson's
