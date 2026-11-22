@@ -1446,10 +1446,9 @@ impl Context {
     #[cold]
     #[inline(never)]
     fn rebuild_assignment(&mut self, experiment_name: &str, has_custom: bool, has_override: bool) {
-        // Slots of a switchback that is now a unit experiment, or gone.
-        if !self.switchbacks.is_empty() {
-            self.switchbacks.remove(experiment_name);
-        }
+        // `init` drops the slots of a switchback that became a unit
+        // experiment or was removed.
+        debug_assert!(!self.switchbacks.contains_key(experiment_name));
 
         let exp_data_opt = self.index.get(experiment_name).map(|e| e.data.clone());
 
@@ -1603,15 +1602,12 @@ impl Context {
         let generation = def.generation;
         let slot = Slot::Switchback { period, now };
 
-        // A new identity starts a new epoch: every slot of the old one goes,
-        // the pre-start slot included.
-        if self
+        // `init` drops an epoch whose identity changed, so every cached slot
+        // here is from the installed generation.
+        debug_assert!(self
             .switchbacks
             .get(experiment_name)
-            .is_some_and(|epoch| epoch.generation != generation)
-        {
-            self.switchbacks.remove(experiment_name);
-        }
+            .is_none_or(|epoch| epoch.generation == generation));
         if self.switchback_slot_is_current(experiment_name, period) {
             return slot;
         }

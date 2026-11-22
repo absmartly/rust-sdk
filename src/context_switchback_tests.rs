@@ -3799,6 +3799,39 @@ fn refresh_to_fewer_arms_redraws_the_period() {
     assert_eq!(variants, vec![2, EXPECTED_2_ARMS[1]]);
 }
 
+// A rule-won period is rechecked against the new arm count instead of
+// redrawn: a variant that still exists keeps its one exposure, and one the
+// refresh removed falls back to the schedule.
+#[test]
+fn refresh_to_fewer_arms_rechecks_a_rule_won_period() {
+    let at = ANCHOR + HOUR + 10;
+    for (rules, expected) in [
+        (ASSIGN_VARIANT_1, vec![rule_exposure("exp_sb", 1, at)]),
+        (ASSIGN_VARIANT_2, vec![rule_exposure("exp_sb", 2, at)]),
+    ] {
+        let mut experiment = sb(3, HOUR);
+        experiment["assignmentRules"] = json!(rules);
+        let clock = Clock::new(at);
+        let mut ctx = context(&clock, data_of(vec![experiment.clone()]));
+        let variant = ctx.treatment("exp_sb").unwrap();
+
+        let mut fewer = sb(2, HOUR);
+        fewer["assignmentRules"] = json!(rules);
+        ctx.refresh_with(data_of(vec![fewer]));
+        let after = ctx.treatment("exp_sb").unwrap();
+        let queued = queued(&mut ctx);
+        assert_eq!(queued[0], expected[0]);
+        if variant == 1 {
+            assert_eq!(after, 1);
+            assert_eq!(queued.len(), 1);
+        } else {
+            assert_eq!(after, EXPECTED_2_ARMS[1]);
+            assert_eq!(queued.len(), 2);
+            assert_eq!(queued[1].3, EXPECTED_2_ARMS[1]);
+        }
+    }
+}
+
 // A refresh drops the slots of a switchback it removes or replaces, without
 // waiting for a read of the old name, and keeps the others.
 #[test]
