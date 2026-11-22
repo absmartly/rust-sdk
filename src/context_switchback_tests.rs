@@ -3832,6 +3832,24 @@ fn refresh_to_fewer_arms_rechecks_a_rule_won_period() {
     }
 }
 
+// A pre-start slot cached before any linked unit was set is dropped when the
+// unit arrives, so the rule that now applies is served and exposed.
+#[test]
+fn set_unit_drops_an_absent_pre_start_slot() {
+    let mut experiment = sb(2, HOUR);
+    experiment["assignmentRules"] = json!(ASSIGN_VARIANT_1);
+    let clock = Clock::new(ANCHOR - 10);
+    let mut ctx = bare_context(&clock, &[], data_of(vec![experiment]));
+    ctx.set_attribute(CLUSTER_PATH, CLUSTER_KEY).unwrap();
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), 0);
+    ctx.set_unit(UNIT_TYPE, UID).unwrap();
+    assert_eq!(ctx.treatment("exp_sb").unwrap(), 1);
+    assert_eq!(
+        queued(&mut ctx),
+        vec![rule_exposure("exp_sb", 1, ANCHOR - 10)]
+    );
+}
+
 // A refresh drops the slots of a switchback it removes or replaces, without
 // waiting for a read of the old name, and keeps the others.
 #[test]
