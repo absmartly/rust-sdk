@@ -700,7 +700,7 @@ impl Context {
                 || cached.assignment.overridden
                 || cached.rule.rule_override;
             let suppressed = cached.suppressed;
-            if fire_holdouts {
+            if fire_holdouts && Self::has_unexposed_holdout(cached) {
                 if let Err(payload) = self.trigger_holdout_exposures_deferred(&exp_name) {
                     deferred_panic.get_or_insert(payload);
                 }
@@ -713,6 +713,17 @@ impl Context {
             }
         }
         (suppressed_fallback, deferred_panic)
+    }
+
+    /// Whether a holdout pinned in `cached` still has an exposure to queue,
+    /// so the common candidate skips the panic guard and the clock read.
+    fn has_unexposed_holdout(cached: &CachedAssignment) -> bool {
+        cached.holdouts.iter().any(|holdout| {
+            holdout
+                .assignment
+                .as_ref()
+                .is_some_and(|h| !h.exposed.load(Ordering::Relaxed))
+        })
     }
 
     /// `key` in the variables of the cached assignment's variant.
@@ -731,6 +742,8 @@ impl Context {
         &mut self,
         experiment_name: &str,
     ) -> Result<(), Box<dyn std::any::Any + Send>> {
+        #[cfg(test)]
+        HOLDOUT_TRIGGERS.with(|n| n.set(n.get() + 1));
         panic::catch_unwind(AssertUnwindSafe(|| {
             self.queue_exposures(experiment_name, false)
         }))
@@ -1569,6 +1582,7 @@ impl Context {
 #[cfg(test)]
 thread_local! {
     static COVERAGE_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static HOLDOUT_TRIGGERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn now_millis() -> i64 {

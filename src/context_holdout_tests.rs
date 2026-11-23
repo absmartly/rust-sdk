@@ -1740,6 +1740,63 @@ fn deferred_logger_panic_is_resumed_when_an_exposed_candidate_wins() {
     );
 }
 
+// As in Java, a logger panic from a checked candidate's holdout is raised
+// before the winner is exposed, so the winner's exposure is queued by the
+// next read instead.
+#[test]
+fn deferred_panic_leaves_unexposed_winner_unexposed() {
+    let held_out = covered_by(
+        with_variables(experiment(1, "exp_var_panic_held_out"), "k"),
+        &[11],
+    );
+    let winner = with_config(
+        experiment(2, "exp_var_panic_unexposed"),
+        1,
+        json!({"k": "won"}),
+    );
+    let mut ctx = context(UID, single_holdout(HOLDOUT_A, vec![held_out, winner]));
+    let armed = Arc::new(AtomicBool::new(true));
+    ctx.set_event_logger(panicking_logger(11, armed.clone()));
+
+    let result = catch_unwind(AssertUnwindSafe(|| ctx.variable_value("k", "default")));
+
+    assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
+    armed.store(false, Ordering::Relaxed);
+    assert_eq!(ctx.pending(), 1, "only the holdout exposure is queued");
+    assert_eq!(ctx.variable_value("k", "default").unwrap(), json!("won"));
+    assert_eq!(
+        queued(&mut ctx),
+        vec![
+            holdout_exposure(11, "holdout_a", 0),
+            normal(2, "exp_var_panic_unexposed", NORMAL_VARIANT)
+        ]
+    );
+}
+
+#[test]
+fn variable_reads_skip_the_holdout_trigger_when_nothing_is_left_to_queue() {
+    let covered = covered_by(
+        with_variables(experiment(1, "exp_var_trigger_covered"), "k"),
+        &[11],
+    );
+    let plain = with_variables(experiment(2, "exp_var_trigger_plain"), "k");
+    let mut ctx = context(
+        UID_NOT_HELD_OUT,
+        single_holdout(HOLDOUT_A, vec![covered, plain]),
+    );
+    let triggers = || HOLDOUT_TRIGGERS.with(|n| n.get());
+
+    let before = triggers();
+    ctx.variable_value("k", "default").unwrap();
+    assert_eq!(triggers() - before, 1);
+
+    let before = triggers();
+    for _ in 0..3 {
+        ctx.variable_value("k", "default").unwrap();
+    }
+    assert_eq!(triggers() - before, 0);
+}
+
 #[test]
 fn first_deferred_logger_panic_is_the_one_resumed() {
     let first = covered_by(

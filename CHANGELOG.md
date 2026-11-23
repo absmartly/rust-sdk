@@ -145,6 +145,12 @@ Breaking changes are listed against the released 0.1.0.
   still queue their holdouts' exposures, as in java-sdk), and
   `peek_variable_value()` exposes nothing. `variable_keys()` lists each
   key's experiments once, in id order.
+  This also changes keys that only one experiment defines: `variable_value()`
+  no longer queues an exposure for an experiment the unit is not in (a strict
+  audience mismatch, or a missing unit), and returns the caller's default.
+  Before, such a read published an exposure with `assigned: false`. Nothing
+  needs to change in calling code; `treatment()` still exposes such an
+  experiment when it is called directly.
 
 ## [0.1.0]
 
