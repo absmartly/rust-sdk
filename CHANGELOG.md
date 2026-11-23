@@ -51,7 +51,8 @@ Breaking changes are listed against the released 0.1.0.
   held-out unit variant 0 and control variables and queues the holdout
   exposures. Payloads without holdouts are unaffected.
 - A panicking event logger during `variable_value()` is resumed only after
-  the remaining candidate experiments have queued their exposures.
+  the candidates checked for the key have queued their holdouts' exposures,
+  and before the winning experiment is exposed.
 - Every exposure, in the publish payload and the event logger's `exposure`
   event, now carries `ruleOverride` (`false` unless a rule decided the
   variant), so the backend can exclude rule-assigned exposures from analysis.
@@ -122,6 +123,28 @@ Breaking changes are listed against the released 0.1.0.
 - Context errors spell the brand `ABsmartly` (for example
   `"ABsmartly Context is finalized."`). 0.1.0 used `ABSmartly`, so update
   code that matches on the error text.
+
+### Fixed
+
+- Shared variable keys: when two or more experiments define the same
+  variable key, `variable_value()` queued an exposure for every experiment
+  it checked on the way to a value, including ones the unit was not in
+  (strict audience mismatch, missing unit) and ones that lost. Users were
+  recorded in experiments they never saw. The wrong experiment could also
+  win: candidates were checked in data order, not by id, and when the
+  winner's variant did not define the key the next experiment's value was
+  used instead, so which arm the unit got decided which experiment it
+  landed in. This affects anyone running two or more experiments that
+  share a variable key. The rule is now the same as java-sdk: the
+  candidates are the experiments that define the key in any variant,
+  ordered by experiment id; the first one the unit is in (assigned,
+  overridden or set by an assignment rule) wins; failing that, the first
+  held-out candidate gives its control value; otherwise the caller's
+  default is returned. If the winner's variant lacks the key, the default
+  is returned. Only the winner is exposed (candidates checked before it
+  still queue their holdouts' exposures, as in java-sdk), and
+  `peek_variable_value()` exposes nothing. `variable_keys()` lists each
+  key's experiments once, in id order.
 
 ## [0.1.0]
 

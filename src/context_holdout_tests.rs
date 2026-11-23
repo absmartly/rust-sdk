@@ -1134,8 +1134,8 @@ fn detached_variable_assignment_reresolves_the_key_to_a_new_winning_experiment()
     assert_eq!(
         queued(&mut ctx),
         vec![
-            full_on_exposure("user_id", 1, "exp_detached_variable_winner", 1),
-            holdout_exposure_unit("user_id", 11, "holdout_detached_variable", 1)
+            holdout_exposure_unit("user_id", 11, "holdout_detached_variable", 1),
+            full_on_exposure("user_id", 1, "exp_detached_variable_winner", 1)
         ]
     );
 }
@@ -2084,8 +2084,8 @@ fn variable_value_on_held_out_rule_won_experiment() {
     assert_eq!(
         queued(&mut ctx),
         vec![
-            rule_exposure("exp_holdout_rules", 1),
-            holdout_exposure(11, "holdout_rules_suppression", 0)
+            holdout_exposure(11, "holdout_rules_suppression", 0),
+            rule_exposure("exp_holdout_rules", 1)
         ]
     );
 }
@@ -2626,6 +2626,8 @@ fn refresh_flags_coverage_only_for_covered_entries() {
     assert!(!stale(&ctx, "exp_plain"));
 }
 
+// The overridden or rule-won winner's variant lacks the key: the caller's
+// default, not the later held-out candidate's control value.
 #[test]
 fn overridden_or_rule_won_experiment_is_not_the_control_fallback() {
     for rule_won in [false, true] {
@@ -2651,12 +2653,12 @@ fn overridden_or_rule_won_experiment_is_not_the_control_fallback() {
 
         assert_eq!(
             ctx.peek_variable_value("color", "default").unwrap(),
-            json!("control"),
+            json!("default"),
             "rule_won {rule_won}"
         );
         assert_eq!(
             ctx.variable_value("color", "default").unwrap(),
-            json!("control"),
+            json!("default"),
             "rule_won {rule_won}"
         );
     }
