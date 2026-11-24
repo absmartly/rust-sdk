@@ -94,6 +94,14 @@ fn lower_id_candidate_without_its_unit_is_not_exposed() {
         json!("blue")
     );
     assert_eq!(exposed(&mut ctx), vec![assigned("exp_by_session")]);
+    ctx.treatment("exp_by_user").unwrap();
+    assert_eq!(
+        exposed(&mut ctx),
+        vec![
+            assigned("exp_by_session"),
+            ("exp_by_user".to_string(), 0, false, false, false)
+        ]
+    );
 }
 
 #[test]
