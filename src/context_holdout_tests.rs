@@ -1798,6 +1798,30 @@ fn variable_reads_skip_the_holdout_trigger_when_nothing_is_left_to_queue() {
 }
 
 #[test]
+fn warmed_variable_reads_take_the_fast_path() {
+    let covered = covered_by(
+        with_variables(experiment(1, "exp_var_fast_covered"), "k"),
+        &[11],
+    );
+    let plain = with_variables(experiment(2, "exp_var_fast_plain"), "k");
+    let mut ctx = context(
+        UID_NOT_HELD_OUT,
+        single_holdout(HOLDOUT_A, vec![covered, plain]),
+    );
+    let warmed = || WARMED_READS.with(|n| n.get());
+
+    let before = warmed();
+    ctx.variable_value("k", "default").unwrap();
+    assert_eq!(warmed() - before, 0);
+
+    let before = warmed();
+    for _ in 0..3 {
+        ctx.variable_value("k", "default").unwrap();
+    }
+    assert_eq!(warmed() - before, 3);
+}
+
+#[test]
 fn first_deferred_logger_panic_is_the_one_resumed() {
     let first = covered_by(
         with_variables(experiment(1, "exp_var_first_panic"), "k"),

@@ -698,6 +698,8 @@ impl Context {
                 let value = a.variables.as_ref().and_then(|v| v.get(key)).cloned();
                 // A warmed read: nothing left to queue.
                 if a.exposed && !pending_holdout && deferred_panic.is_none() {
+                    #[cfg(test)]
+                    WARMED_READS.with(|n| n.set(n.get() + 1));
                     return value;
                 }
                 winner = Some((value, a.exposed));
@@ -1600,6 +1602,7 @@ impl Context {
 thread_local! {
     static COVERAGE_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static HOLDOUT_TRIGGERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static WARMED_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn now_millis() -> i64 {
