@@ -654,65 +654,92 @@ impl Context {
             .unwrap_or_else(|| default_value.into()))
     }
 
-    /// The value of the winning candidate (see [`Self::variable_candidate`]),
-    /// without exposures.
+    /// [`Self::resolve_variable_value`] without exposures, kept as its own
+    /// walk so a peek does not pay for the exposure bookkeeping.
     fn peek_variable(&mut self, key: &str) -> Option<Value> {
-        let (candidate, _) = self.variable_candidate(key, false);
-        self.candidate_value(&candidate?, key)
-    }
-
-    /// The value of the winning candidate (see [`Self::variable_candidate`]).
-    /// Only that candidate is exposed; the candidates checked before it
-    /// queue only their holdouts' exposures, as in Java. A logger panic from
-    /// those is resumed once the walk ends, before anything is exposed.
-    fn resolve_variable_value(&mut self, key: &str) -> Option<Value> {
-        let (candidate, deferred_panic) = self.variable_candidate(key, true);
-        if let Some(payload) = deferred_panic {
-            panic::resume_unwind(payload);
-        }
-        let candidate = candidate?;
-        let entry = self.assignments.get_mut(&candidate)?;
-        if !entry.assignment.exposed {
-            entry.assignment.exposed = true;
-            self.trigger_exposures(&candidate);
-        }
-        self.candidate_value(&candidate, key)
-    }
-
-    /// The experiment that decides `key`: the first candidate, in id order,
-    /// that the unit is in (assigned, overridden or set by a rule), else the
-    /// first held-out candidate. The winner's variant decides the value even
-    /// when it lacks the key, so a later candidate never takes over because
-    /// of the arm the unit got. With `fire_holdouts`, every candidate checked
-    /// queues its holdouts' exposures, and the first logger panic is returned.
-    fn variable_candidate(
-        &mut self,
-        key: &str,
-        fire_holdouts: bool,
-    ) -> (Option<String>, Option<Box<dyn std::any::Any + Send>>) {
-        let candidate_count = self.index_variables.get(key).map_or(0, Vec::len);
+        let candidate_count = self.index_variables.get(key)?.len();
         let mut suppressed_fallback: Option<String> = None;
-        let mut deferred_panic = None;
         for i in 0..candidate_count {
             let exp_name = self.index_variables[key][i].clone();
             let cached = self.assign(&exp_name);
-            let wins = cached.assignment.assigned
-                || cached.assignment.overridden
-                || cached.rule.rule_override;
+            let a = &cached.assignment;
+            if a.assigned || a.overridden || cached.rule.rule_override {
+                return a.variables.as_ref()?.get(key).cloned();
+            }
+            if cached.suppressed && suppressed_fallback.is_none() {
+                suppressed_fallback = Some(exp_name);
+            }
+        }
+        self.control_value(suppressed_fallback?, key)
+    }
+
+    /// The value of `key` from the experiment that decides it: the first
+    /// candidate, in id order, that the unit is in (assigned, overridden or
+    /// set by a rule), else the first held-out candidate's control value.
+    /// The winner's variant decides even when it lacks the key, so a later
+    /// candidate never takes over because of the arm the unit got.
+    ///
+    /// Only the winner is exposed. As in Java, every candidate checked
+    /// queues its holdouts' exposures, and a logger panic from those is
+    /// resumed once the walk ends, before the winner is exposed.
+    fn resolve_variable_value(&mut self, key: &str) -> Option<Value> {
+        let candidate_count = self.index_variables.get(key)?.len();
+        let mut suppressed_fallback: Option<String> = None;
+        let mut deferred_panic = None;
+        let mut winner = None;
+        for i in 0..candidate_count {
+            let exp_name = self.index_variables[key][i].clone();
+            let cached = self.assign(&exp_name);
+            let a = &cached.assignment;
+            let wins = a.assigned || a.overridden || cached.rule.rule_override;
             let suppressed = cached.suppressed;
-            if fire_holdouts && Self::has_unexposed_holdout(cached) {
+            let pending_holdout = Self::has_unexposed_holdout(cached);
+            if wins {
+                let value = a.variables.as_ref().and_then(|v| v.get(key)).cloned();
+                // A warmed read: nothing left to queue.
+                if a.exposed && !pending_holdout && deferred_panic.is_none() {
+                    return value;
+                }
+                winner = Some((value, a.exposed));
+            }
+            if pending_holdout {
                 if let Err(payload) = self.trigger_holdout_exposures_deferred(&exp_name) {
                     deferred_panic.get_or_insert(payload);
                 }
             }
-            if wins {
-                return (Some(exp_name), deferred_panic);
+            if let Some((value, exposed)) = winner {
+                if let Some(payload) = deferred_panic {
+                    panic::resume_unwind(payload);
+                }
+                if !exposed {
+                    if let Some(entry) = self.assignments.get_mut(&exp_name) {
+                        entry.assignment.exposed = true;
+                    }
+                    self.trigger_exposures(&exp_name);
+                }
+                return value;
             }
             if suppressed && suppressed_fallback.is_none() {
                 suppressed_fallback = Some(exp_name);
             }
         }
-        (suppressed_fallback, deferred_panic)
+        if let Some(payload) = deferred_panic {
+            panic::resume_unwind(payload);
+        }
+        // A held-out candidate queues no exposure of its own, and its
+        // holdouts' exposures were queued above.
+        self.control_value(suppressed_fallback?, key)
+    }
+
+    /// The held-out candidate's control value for `key`, cloned only once
+    /// nothing else has won.
+    fn control_value(&self, experiment_name: String, key: &str) -> Option<Value> {
+        self.assignments[&experiment_name]
+            .assignment
+            .variables
+            .as_ref()?
+            .get(key)
+            .cloned()
     }
 
     /// Whether a holdout pinned in `cached` still has an exposure to queue,
@@ -724,16 +751,6 @@ impl Context {
                 .as_ref()
                 .is_some_and(|h| !h.exposed.load(Ordering::Relaxed))
         })
-    }
-
-    /// `key` in the variables of the cached assignment's variant.
-    fn candidate_value(&self, experiment_name: &str, key: &str) -> Option<Value> {
-        self.assignments[experiment_name]
-            .assignment
-            .variables
-            .as_ref()?
-            .get(key)
-            .cloned()
     }
 
     #[cold]

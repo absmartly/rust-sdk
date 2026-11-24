@@ -53,6 +53,8 @@ Breaking changes are listed against the released 0.1.0.
 - A panicking event logger during `variable_value()` is resumed only after
   the candidates checked for the key have queued their holdouts' exposures,
   and before the winning experiment is exposed.
+- `variable_value()` exposes only the experiment that decides the key, and
+  no longer one the unit is not in; see Fixed (shared variable keys).
 - Every exposure, in the publish payload and the event logger's `exposure`
   event, now carries `ruleOverride` (`false` unless a rule decided the
   variant), so the backend can exclude rule-assigned exposures from analysis.
