@@ -45,7 +45,12 @@ Breaking changes are listed against the released 0.1.0.
   call queues an experiment's exposure and its holdouts' exposures, all of
   them are queued before the first callback, so `pending()` in that
   callback already counts every one (javascript-sdk counts them one at a
-  time). Payloads and order are the same.
+  time). `variable_value()` is the exception: it queues/logs the checked
+  candidates' holdouts before queuing/logging the winner's own exposure,
+  so the first holdout callback does not yet count the winner in
+  `pending()`. For variable reads this also changes the exposure order
+  to holdouts before winner, matching Java; other calls retain their
+  previous exposure order.
 - **This can change assignment** for payloads that already carry
   `holdouts` and `holdoutIds`: 0.1.0 ignored them, while 0.2.0 gives a
   held-out unit variant 0 and control variables and queues the holdout
