@@ -1798,6 +1798,32 @@ fn variable_reads_skip_the_holdout_trigger_when_nothing_is_left_to_queue() {
 }
 
 #[test]
+fn losing_candidates_skip_the_holdout_trigger_once_their_holdout_is_exposed() {
+    let mut losing = covered_by(
+        with_variables(experiment(1, "exp_var_trigger_losing"), "k"),
+        &[11],
+    );
+    losing["audienceStrict"] = json!(true);
+    losing["audience"] = json!(r#"{"filter":[{"gte":[{"var":"age"},{"value":20}]}]}"#);
+    let winner = with_variables(experiment(2, "exp_var_trigger_winner"), "k");
+    let mut ctx = context(
+        UID_NOT_HELD_OUT,
+        single_holdout(HOLDOUT_A, vec![losing, winner]),
+    );
+    let triggers = || HOLDOUT_TRIGGERS.with(|n| n.get());
+
+    let before = triggers();
+    ctx.variable_value("k", "default").unwrap();
+    assert_eq!(triggers() - before, 1);
+
+    let before = triggers();
+    for _ in 0..3 {
+        ctx.variable_value("k", "default").unwrap();
+    }
+    assert_eq!(triggers() - before, 0);
+}
+
+#[test]
 fn warmed_variable_reads_take_the_fast_path() {
     let covered = covered_by(
         with_variables(experiment(1, "exp_var_fast_covered"), "k"),
