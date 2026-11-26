@@ -165,6 +165,62 @@ fn override_on_a_present_experiment_is_exposed_once() {
     );
 }
 
+/// `(id, unit)` of each queued exposure.
+fn exposure_ids(ctx: &mut Context) -> Vec<(i64, Option<String>)> {
+    ctx.get_publish_params()
+        .exposures
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| (e.id, e.unit))
+        .collect()
+}
+
+fn refreshed(experiments: Vec<Value>) -> ContextData {
+    serde_json::from_value(json!({"experiments": experiments, "holdouts": []})).unwrap()
+}
+
+#[test]
+fn refresh_that_changes_an_overridden_experiments_id_rebuilds_the_override() {
+    let mut ctx = context(vec![experiment(2, "exp_over", "color", json!("red"))]);
+    ctx.set_override("exp_over", 1).unwrap();
+    assert_eq!(ctx.peek("exp_over").unwrap(), 1);
+
+    ctx.refresh_with(refreshed(vec![experiment(
+        5,
+        "exp_over",
+        "color",
+        json!("red"),
+    )]));
+    ctx.treatment("exp_over").unwrap();
+
+    assert_eq!(
+        exposure_ids(&mut ctx),
+        vec![(5, Some("session_id".to_string()))]
+    );
+}
+
+#[test]
+fn refresh_that_changes_an_overridden_experiments_unit_type_rebuilds_the_override() {
+    let mut ctx = context(vec![experiment(2, "exp_over", "color", json!("red"))]);
+    ctx.set_unit("user_id", "user-1").unwrap();
+    ctx.set_override("exp_over", 1).unwrap();
+    assert_eq!(ctx.peek("exp_over").unwrap(), 1);
+
+    ctx.refresh_with(refreshed(vec![experiment_with_unit(
+        2,
+        "exp_over",
+        "user_id",
+        "color",
+        json!("red"),
+    )]));
+    ctx.treatment("exp_over").unwrap();
+
+    assert_eq!(
+        exposure_ids(&mut ctx),
+        vec![(2, Some("user_id".to_string()))]
+    );
+}
+
 #[test]
 fn variable_keys_lists_each_candidate_once_in_id_order() {
     let ctx = context(vec![

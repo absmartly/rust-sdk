@@ -160,6 +160,15 @@ Breaking changes are listed against the released 0.1.0.
   Before, such a read published an exposure with `assigned: false`. Nothing
   needs to change in calling code; `treatment()` still exposes such an
   experiment when it is called directly.
+- Overrides: a cached override is rebuilt when a refresh adds its
+  experiment or changes the experiment's id or unit type. Before, an
+  override set while its experiment was absent from the data kept id `0`
+  and no variables after a refresh added the experiment, so
+  `variable_value()` returned the caller's default and published an
+  exposure with id `0`. Now the next read uses the experiment's current id,
+  unit type and variables, and queues one exposure with them, even if the
+  stale override was already exposed. Only contexts that use overrides are
+  affected. javascript-sdk and java-sdk do not rebuild overrides this way.
 
 ## [0.1.0]
 

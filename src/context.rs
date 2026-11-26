@@ -1074,7 +1074,8 @@ impl Context {
     fn refresh_assignment(&mut self, experiment_name: &str) {
         let has_custom = self.cassignments.contains_key(experiment_name);
         let has_override = self.overrides.contains_key(experiment_name);
-        let has_experiment = self.index.contains_key(experiment_name);
+        let indexed = self.index.get(experiment_name);
+        let has_experiment = indexed.is_some();
 
         // A refresh only flags a coverage change; it is compared here, on
         // the next read, so a change a later refresh undoes is no change.
@@ -1088,9 +1089,7 @@ impl Context {
                 // type, so those are what must still match.
                 if a.overridden
                     && a.variant == self.overrides[experiment_name]
-                    && self
-                        .index
-                        .get(experiment_name)
+                    && indexed
                         .is_none_or(|exp| exp.data.id == a.id && exp.data.unit_type == a.unit_type)
                 {
                     return;
