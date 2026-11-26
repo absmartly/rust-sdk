@@ -135,15 +135,36 @@ fn refresh_rebuilds_cached_override_when_experiment_becomes_available() {
     .unwrap();
     ctx.refresh_with(refreshed);
 
-    assert_eq!(
-        ctx.variable_value("color", "default").unwrap(),
-        json!("new")
-    );
+    for _ in 0..3 {
+        assert_eq!(
+            ctx.variable_value("color", "default").unwrap(),
+            json!("new")
+        );
+    }
     assert_eq!(
         exposed(&mut ctx),
         vec![("exp_new".to_string(), 1, false, true, false)]
     );
 }
+
+#[test]
+fn override_on_a_present_experiment_is_exposed_once() {
+    let mut ctx = context(vec![experiment(1, "exp_over", "color", json!("red"))]);
+    ctx.set_override("exp_over", 1).unwrap();
+
+    for _ in 0..3 {
+        assert_eq!(ctx.treatment("exp_over").unwrap(), 1);
+        assert_eq!(
+            ctx.variable_value("color", "default").unwrap(),
+            json!("red")
+        );
+    }
+    assert_eq!(
+        exposed(&mut ctx),
+        vec![("exp_over".to_string(), 1, false, true, false)]
+    );
+}
+
 #[test]
 fn variable_keys_lists_each_candidate_once_in_id_order() {
     let ctx = context(vec![

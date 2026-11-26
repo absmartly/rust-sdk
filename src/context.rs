@@ -1084,10 +1084,14 @@ impl Context {
         }) {
             let a = &cached.assignment;
             if has_override {
+                // An override records only the experiment's id and unit
+                // type, so those are what must still match.
                 if a.overridden
                     && a.variant == self.overrides[experiment_name]
-                    && (!has_experiment
-                        || Self::experiment_matches(&self.index[experiment_name].data, a))
+                    && self
+                        .index
+                        .get(experiment_name)
+                        .is_none_or(|exp| exp.data.id == a.id && exp.data.unit_type == a.unit_type)
                 {
                     return;
                 }
