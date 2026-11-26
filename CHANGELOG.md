@@ -55,9 +55,11 @@ Breaking changes are listed against the released 0.1.0.
   `holdouts` and `holdoutIds`: 0.1.0 ignored them, while 0.2.0 gives a
   held-out unit variant 0 and control variables and queues the holdout
   exposures. Payloads without holdouts are unaffected.
-- A panicking event logger during `variable_value()` is resumed only after
-  the candidates checked for the key have queued their holdouts' exposures,
-  and before the winning experiment is exposed.
+- A panicking event logger on a holdout exposure during `variable_value()`
+  is resumed only after the candidates checked for the key have queued their
+  holdouts' exposures, and before the winning experiment is exposed. A panic
+  in the winner's own exposure callback propagates as before, after that
+  exposure is queued.
 - `variable_value()` exposes only the experiment that decides the key, and
   no longer one the unit is not in; see Fixed (shared variable keys).
 - Every exposure, in the publish payload and the event logger's `exposure`

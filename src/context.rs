@@ -1365,8 +1365,6 @@ impl Context {
         self.queue_exposures(experiment_name, true);
     }
 
-    /// [`Self::trigger_exposures`], with the experiment's own exposure only
-    /// when `own` is set.
     fn queue_exposures(&mut self, experiment_name: &str, own: bool) {
         let Some(cached) = self.assignments.get(experiment_name) else {
             return;

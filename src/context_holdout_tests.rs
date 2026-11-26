@@ -2733,8 +2733,6 @@ fn refresh_flags_coverage_only_for_covered_entries() {
     assert!(!stale(&ctx, "exp_plain"));
 }
 
-// The overridden or rule-won winner's variant lacks the key: the caller's
-// default, not the later held-out candidate's control value.
 #[test]
 fn overridden_or_rule_won_experiment_is_not_the_control_fallback() {
     for rule_won in [false, true] {
