@@ -123,6 +123,28 @@ fn candidates_are_ordered_by_experiment_id_not_data_order() {
 }
 
 #[test]
+fn refresh_rebuilds_cached_override_when_experiment_becomes_available() {
+    let mut ctx = context(vec![]);
+    ctx.set_override("exp_new", 1).unwrap();
+    assert_eq!(ctx.peek("exp_new").unwrap(), 1);
+
+    let refreshed: ContextData = serde_json::from_value(json!({
+        "experiments": [experiment(2, "exp_new", "color", json!("new"))],
+        "holdouts": []
+    }))
+    .unwrap();
+    ctx.refresh_with(refreshed);
+
+    assert_eq!(
+        ctx.variable_value("color", "default").unwrap(),
+        json!("new")
+    );
+    assert_eq!(
+        exposed(&mut ctx),
+        vec![("exp_new".to_string(), 1, false, true, false)]
+    );
+}
+#[test]
 fn variable_keys_lists_each_candidate_once_in_id_order() {
     let ctx = context(vec![
         experiment(9, "exp_high", "color", json!("high")),

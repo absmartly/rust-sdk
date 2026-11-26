@@ -686,7 +686,6 @@ impl Context {
         let candidate_count = self.index_variables.get(key)?.len();
         let mut suppressed_fallback: Option<String> = None;
         let mut deferred_panic = None;
-        let mut winner = None;
         for i in 0..candidate_count {
             let exp_name = self.index_variables[key][i].clone();
             let cached = self.assign(&exp_name);
@@ -694,16 +693,17 @@ impl Context {
             let wins = a.assigned || a.overridden || cached.rule.rule_override;
             let suppressed = cached.suppressed;
             let pending_holdout = Self::has_unexposed_holdout(cached);
-            if wins {
+            let winner = if wins {
                 let value = a.variables.as_ref().and_then(|v| v.get(key)).cloned();
-                // A warmed read: nothing left to queue.
                 if a.exposed && !pending_holdout && deferred_panic.is_none() {
                     #[cfg(test)]
                     WARMED_READS.with(|n| n.set(n.get() + 1));
                     return value;
                 }
-                winner = Some((value, a.exposed));
-            }
+                Some((value, a.exposed))
+            } else {
+                None
+            };
             if pending_holdout {
                 if let Err(payload) = self.trigger_holdout_exposures_deferred(&exp_name) {
                     deferred_panic.get_or_insert(payload);
@@ -728,8 +728,6 @@ impl Context {
         if let Some(payload) = deferred_panic {
             panic::resume_unwind(payload);
         }
-        // A held-out candidate queues no exposure of its own, and its
-        // holdouts' exposures were queued above.
         self.control_value(suppressed_fallback?, key)
     }
 
@@ -1086,7 +1084,11 @@ impl Context {
         }) {
             let a = &cached.assignment;
             if has_override {
-                if a.overridden && a.variant == self.overrides[experiment_name] {
+                if a.overridden
+                    && a.variant == self.overrides[experiment_name]
+                    && (!has_experiment
+                        || Self::experiment_matches(&self.index[experiment_name].data, a))
+                {
                     return;
                 }
             } else if !has_experiment {
