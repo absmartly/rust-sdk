@@ -276,6 +276,8 @@ impl Context {
             .map(|holdout| (holdout.id, Arc::new(holdout.clone())))
             .collect();
 
+        // Each key's candidates, by experiment id and once each, as in Java.
+        let mut candidates: HashMap<String, Vec<(i64, String)>> = HashMap::new();
         for experiment in &self.data.experiments {
             let mut variables: Vec<HashMap<String, Value>> = Vec::new();
 
@@ -302,10 +304,10 @@ impl Context {
                     .unwrap_or_default();
 
                 for key in parsed.keys() {
-                    self.index_variables
+                    candidates
                         .entry(key.clone())
                         .or_default()
-                        .push(experiment.name.clone());
+                        .push((experiment.id, experiment.name.clone()));
                 }
 
                 variables.push(parsed);
@@ -353,6 +355,13 @@ impl Context {
                     holdouts,
                 },
             );
+        }
+
+        for (key, mut experiments) in candidates {
+            experiments.sort_by_key(|(id, _)| *id);
+            experiments.dedup_by_key(|(id, _)| *id);
+            let names = experiments.into_iter().map(|(_, name)| name).collect();
+            self.index_variables.insert(key, names);
         }
     }
 
@@ -654,25 +663,25 @@ impl Context {
             let exp_name = self.index_variables[key][i].clone();
             let cached = self.assign(&exp_name);
             let a = &cached.assignment;
-            let Some(variables) = &a.variables else {
-                continue;
-            };
             if a.assigned || a.overridden || cached.rule.rule_override {
-                if let Some(value) = variables.get(key) {
-                    return Some(value.clone());
-                }
-            } else if cached.suppressed && suppressed_fallback.is_none() {
+                return a.variables.as_ref()?.get(key).cloned();
+            }
+            if cached.suppressed && suppressed_fallback.is_none() {
                 suppressed_fallback = Some(exp_name);
             }
         }
         self.control_value(suppressed_fallback?, key)
     }
 
-    /// The value of `key` from the first experiment that assigns it. A
-    /// held-out unit reads the control value of the first suppressed
-    /// experiment instead of the caller's default when nothing else wins.
-    /// A panicking event logger is resumed only after the remaining
-    /// candidates have queued their exposures.
+    /// The value of `key` from the experiment that decides it: the first
+    /// candidate, in id order, that the unit is in (assigned, overridden or
+    /// set by a rule), else the first held-out candidate's control value.
+    /// The winner's variant decides even when it lacks the key, so a later
+    /// candidate never takes over because of the arm the unit got.
+    ///
+    /// Only the winner is exposed. As in Java, every candidate checked
+    /// queues its holdouts' exposures, and a logger panic from those is
+    /// resumed once the walk ends, before the winner is exposed.
     fn resolve_variable_value(&mut self, key: &str) -> Option<Value> {
         let candidate_count = self.index_variables.get(key)?.len();
         let mut suppressed_fallback: Option<String> = None;
@@ -681,40 +690,49 @@ impl Context {
             let exp_name = self.index_variables[key][i].clone();
             let cached = self.assign(&exp_name);
             let a = &cached.assignment;
-            let Some(variables) = &a.variables else {
-                continue;
-            };
             let wins = a.assigned || a.overridden || cached.rule.rule_override;
-            let value = if wins { variables.get(key) } else { None };
-            if a.exposed {
-                if let Some(value) = value {
-                    let value = value.clone();
-                    return Self::settle(deferred_panic, Some(value));
+            let suppressed = cached.suppressed;
+            let pending_holdout = Self::has_unexposed_holdout(cached);
+            let winner = if wins {
+                let value = a.variables.as_ref().and_then(|v| v.get(key)).cloned();
+                if a.exposed && !pending_holdout && deferred_panic.is_none() {
+                    #[cfg(test)]
+                    WARMED_READS.with(|n| n.set(n.get() + 1));
+                    return value;
                 }
-            }
-            let fallback = !wins && cached.suppressed && suppressed_fallback.is_none();
-            if !a.exposed {
-                let value = value.cloned();
-                if let Some(entry) = self.assignments.get_mut(&exp_name) {
-                    entry.assignment.exposed = true;
-                }
-                if let Err(payload) = self.trigger_exposures_deferred(&exp_name) {
+                Some((value, a.exposed))
+            } else {
+                None
+            };
+            if pending_holdout {
+                if let Err(payload) = self.trigger_holdout_exposures_deferred(&exp_name) {
                     deferred_panic.get_or_insert(payload);
                 }
-                if value.is_some() {
-                    return Self::settle(deferred_panic, value);
-                }
             }
-            if fallback {
+            if let Some((value, exposed)) = winner {
+                if let Some(payload) = deferred_panic {
+                    panic::resume_unwind(payload);
+                }
+                if !exposed {
+                    if let Some(entry) = self.assignments.get_mut(&exp_name) {
+                        entry.assignment.exposed = true;
+                    }
+                    self.trigger_exposures(&exp_name);
+                }
+                return value;
+            }
+            if suppressed && suppressed_fallback.is_none() {
                 suppressed_fallback = Some(exp_name);
             }
         }
-        let fallback = suppressed_fallback.and_then(|name| self.control_value(name, key));
-        Self::settle(deferred_panic, fallback)
+        if let Some(payload) = deferred_panic {
+            panic::resume_unwind(payload);
+        }
+        self.control_value(suppressed_fallback?, key)
     }
 
-    /// The first suppressed candidate's control value for `key`, cloned only
-    /// once nothing else has won.
+    /// The held-out candidate's control value for `key`, cloned only once
+    /// nothing else has won.
     fn control_value(&self, experiment_name: String, key: &str) -> Option<Value> {
         self.assignments[&experiment_name]
             .assignment
@@ -724,24 +742,28 @@ impl Context {
             .cloned()
     }
 
-    /// `value`, or the deferred logger panic resumed unchanged.
-    fn settle(
-        deferred_panic: Option<Box<dyn std::any::Any + Send>>,
-        value: Option<Value>,
-    ) -> Option<Value> {
-        if let Some(payload) = deferred_panic {
-            panic::resume_unwind(payload);
-        }
-        value
+    /// Whether a holdout pinned in `cached` still has an exposure to queue,
+    /// so the common candidate skips the panic guard and the clock read.
+    fn has_unexposed_holdout(cached: &CachedAssignment) -> bool {
+        cached.holdouts.iter().any(|holdout| {
+            holdout
+                .assignment
+                .as_ref()
+                .is_some_and(|h| !h.exposed.load(Ordering::Relaxed))
+        })
     }
 
     #[cold]
     #[inline(never)]
-    fn trigger_exposures_deferred(
+    fn trigger_holdout_exposures_deferred(
         &mut self,
         experiment_name: &str,
     ) -> Result<(), Box<dyn std::any::Any + Send>> {
-        panic::catch_unwind(AssertUnwindSafe(|| self.trigger_exposures(experiment_name)))
+        #[cfg(test)]
+        HOLDOUT_TRIGGERS.with(|n| n.set(n.get() + 1));
+        panic::catch_unwind(AssertUnwindSafe(|| {
+            self.queue_exposures(experiment_name, false)
+        }))
     }
 
     pub fn variable_keys(&self) -> Result<HashMap<String, Vec<String>>, String> {
@@ -1052,7 +1074,8 @@ impl Context {
     fn refresh_assignment(&mut self, experiment_name: &str) {
         let has_custom = self.cassignments.contains_key(experiment_name);
         let has_override = self.overrides.contains_key(experiment_name);
-        let has_experiment = self.index.contains_key(experiment_name);
+        let indexed = self.index.get(experiment_name);
+        let has_experiment = indexed.is_some();
 
         // A refresh only flags a coverage change; it is compared here, on
         // the next read, so a change a later refresh undoes is no change.
@@ -1062,7 +1085,13 @@ impl Context {
         }) {
             let a = &cached.assignment;
             if has_override {
-                if a.overridden && a.variant == self.overrides[experiment_name] {
+                // An override records only the experiment's id and unit
+                // type, so those are what must still match.
+                if a.overridden
+                    && a.variant == self.overrides[experiment_name]
+                    && indexed
+                        .is_none_or(|exp| exp.data.id == a.id && exp.data.unit_type == a.unit_type)
+                {
                     return;
                 }
             } else if !has_experiment {
@@ -1336,12 +1365,17 @@ impl Context {
     /// has not seen yet. As in the JS SDK, each exposure is queued before
     /// the event logger sees it.
     fn trigger_exposures(&mut self, experiment_name: &str) {
+        self.queue_exposures(experiment_name, true);
+    }
+
+    fn queue_exposures(&mut self, experiment_name: &str, own: bool) {
         let Some(cached) = self.assignments.get(experiment_name) else {
             return;
         };
         let now = now_millis();
         let first = self.exposures.len();
-        if !cached.suppressed || cached.assignment.overridden || cached.rule.rule_override {
+        if own && (!cached.suppressed || cached.assignment.overridden || cached.rule.rule_override)
+        {
             let a = &cached.assignment;
             self.exposures.push(Exposure {
                 id: a.id,
@@ -1570,6 +1604,8 @@ impl Context {
 #[cfg(test)]
 thread_local! {
     static COVERAGE_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static HOLDOUT_TRIGGERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static WARMED_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn now_millis() -> i64 {

@@ -45,13 +45,23 @@ Breaking changes are listed against the released 0.1.0.
   call queues an experiment's exposure and its holdouts' exposures, all of
   them are queued before the first callback, so `pending()` in that
   callback already counts every one (javascript-sdk counts them one at a
-  time). Payloads and order are the same.
+  time). `variable_value()` is the exception: it queues/logs the checked
+  candidates' holdouts before queuing/logging the winner's own exposure,
+  so the first holdout callback does not yet count the winner in
+  `pending()`. For variable reads this also changes the exposure order
+  to holdouts before winner, matching Java; other calls retain their
+  previous exposure order.
 - **This can change assignment** for payloads that already carry
   `holdouts` and `holdoutIds`: 0.1.0 ignored them, while 0.2.0 gives a
   held-out unit variant 0 and control variables and queues the holdout
   exposures. Payloads without holdouts are unaffected.
-- A panicking event logger during `variable_value()` is resumed only after
-  the remaining candidate experiments have queued their exposures.
+- A panicking event logger on a holdout exposure during `variable_value()`
+  is resumed only after the candidates checked for the key have queued their
+  holdouts' exposures, and before the winning experiment is exposed. A panic
+  in the winner's own exposure callback propagates as before, after that
+  exposure is queued.
+- `variable_value()` exposes only the experiment that decides the key, and
+  no longer one the unit is not in; see Fixed (shared variable keys).
 - Every exposure, in the publish payload and the event logger's `exposure`
   event, now carries `ruleOverride` (`false` unless a rule decided the
   variant), so the backend can exclude rule-assigned exposures from analysis.
@@ -122,6 +132,43 @@ Breaking changes are listed against the released 0.1.0.
 - Context errors spell the brand `ABsmartly` (for example
   `"ABsmartly Context is finalized."`). 0.1.0 used `ABSmartly`, so update
   code that matches on the error text.
+
+### Fixed
+
+- Shared variable keys: when two or more experiments define the same
+  variable key, `variable_value()` queued an exposure for every experiment
+  it checked on the way to a value, including ones the unit was not in
+  (strict audience mismatch, missing unit) and ones that lost. Users were
+  recorded in experiments they never saw. The wrong experiment could also
+  win: candidates were checked in data order, not by id, and when the
+  winner's variant did not define the key the next experiment's value was
+  used instead, so which arm the unit got decided which experiment it
+  landed in. This affects anyone running two or more experiments that
+  share a variable key. The rule is now the same as java-sdk: the
+  candidates are the experiments that define the key in any variant,
+  ordered by experiment id; the first one the unit is in (assigned,
+  overridden or set by an assignment rule) wins; failing that, the first
+  held-out candidate gives its control value; otherwise the caller's
+  default is returned. If the winner's variant lacks the key, the default
+  is returned. Only the winner is exposed (candidates checked before it
+  still queue their holdouts' exposures, as in java-sdk), and
+  `peek_variable_value()` exposes nothing. `variable_keys()` lists each
+  key's experiments once, in id order.
+  This also changes keys that only one experiment defines: `variable_value()`
+  no longer queues an exposure for an experiment the unit is not in (a strict
+  audience mismatch, or a missing unit), and returns the caller's default.
+  Before, such a read published an exposure with `assigned: false`. Nothing
+  needs to change in calling code; `treatment()` still exposes such an
+  experiment when it is called directly.
+- Overrides: a cached override is rebuilt when a refresh adds its
+  experiment or changes the experiment's id or unit type. Before, an
+  override set while its experiment was absent from the data kept id `0`
+  and no variables after a refresh added the experiment, so
+  `variable_value()` returned the caller's default and published an
+  exposure with id `0`. Now the next read uses the experiment's current id,
+  unit type and variables, and queues one exposure with them, even if the
+  stale override was already exposed. Only contexts that use overrides are
+  affected. javascript-sdk and java-sdk do not rebuild overrides this way.
 
 ## [0.1.0]
 

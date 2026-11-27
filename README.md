@@ -212,6 +212,10 @@ if variant == 0 {
 let button_color = context.peek_variable_value("button.color", "red");
 ```
 
+#### Shared Variable Keys
+
+When several experiments define the same variable key, one experiment decides it. The candidates are the experiments whose variants define the key, in experiment id order, and the first one the unit is in (assigned, overridden or set by an assignment rule) wins. If none is, the first candidate whose holdout holds the unit out gives its control value; otherwise the default is returned. If the winning variant does not define the key, the default is returned rather than a later experiment's value. Only the winning experiment queues its own exposure (the holdouts covering the candidates checked before it still queue theirs), and `peek_variable_value()` exposes nothing.
+
 ### Overriding Treatment Variants
 
 During development, for example, it is useful to force a treatment for an experiment. This can be achieved with the `set_override()` method. The `set_override()` and `set_overrides()` methods can be called before the context is ready.

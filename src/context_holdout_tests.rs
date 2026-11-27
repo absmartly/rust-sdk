@@ -1134,8 +1134,8 @@ fn detached_variable_assignment_reresolves_the_key_to_a_new_winning_experiment()
     assert_eq!(
         queued(&mut ctx),
         vec![
-            full_on_exposure("user_id", 1, "exp_detached_variable_winner", 1),
-            holdout_exposure_unit("user_id", 11, "holdout_detached_variable", 1)
+            holdout_exposure_unit("user_id", 11, "holdout_detached_variable", 1),
+            full_on_exposure("user_id", 1, "exp_detached_variable_winner", 1)
         ]
     );
 }
@@ -1740,6 +1740,113 @@ fn deferred_logger_panic_is_resumed_when_an_exposed_candidate_wins() {
     );
 }
 
+// As in Java, a logger panic from a checked candidate's holdout is raised
+// before the winner is exposed, so the winner's exposure is queued by the
+// next read instead.
+#[test]
+fn deferred_panic_leaves_unexposed_winner_unexposed() {
+    let held_out = covered_by(
+        with_variables(experiment(1, "exp_var_panic_held_out"), "k"),
+        &[11],
+    );
+    let winner = with_config(
+        experiment(2, "exp_var_panic_unexposed"),
+        1,
+        json!({"k": "won"}),
+    );
+    let mut ctx = context(UID, single_holdout(HOLDOUT_A, vec![held_out, winner]));
+    let armed = Arc::new(AtomicBool::new(true));
+    ctx.set_event_logger(panicking_logger(11, armed.clone()));
+
+    let result = catch_unwind(AssertUnwindSafe(|| ctx.variable_value("k", "default")));
+
+    assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"boom"));
+    armed.store(false, Ordering::Relaxed);
+    assert_eq!(ctx.pending(), 1, "only the holdout exposure is queued");
+    assert_eq!(ctx.variable_value("k", "default").unwrap(), json!("won"));
+    assert_eq!(
+        queued(&mut ctx),
+        vec![
+            holdout_exposure(11, "holdout_a", 0),
+            normal(2, "exp_var_panic_unexposed", NORMAL_VARIANT)
+        ]
+    );
+}
+
+#[test]
+fn variable_reads_skip_the_holdout_trigger_when_nothing_is_left_to_queue() {
+    let covered = covered_by(
+        with_variables(experiment(1, "exp_var_trigger_covered"), "k"),
+        &[11],
+    );
+    let plain = with_variables(experiment(2, "exp_var_trigger_plain"), "k");
+    let mut ctx = context(
+        UID_NOT_HELD_OUT,
+        single_holdout(HOLDOUT_A, vec![covered, plain]),
+    );
+    let triggers = || HOLDOUT_TRIGGERS.with(|n| n.get());
+
+    let before = triggers();
+    ctx.variable_value("k", "default").unwrap();
+    assert_eq!(triggers() - before, 1);
+
+    let before = triggers();
+    for _ in 0..3 {
+        ctx.variable_value("k", "default").unwrap();
+    }
+    assert_eq!(triggers() - before, 0);
+}
+
+#[test]
+fn losing_candidates_skip_the_holdout_trigger_once_their_holdout_is_exposed() {
+    let mut losing = covered_by(
+        with_variables(experiment(1, "exp_var_trigger_losing"), "k"),
+        &[11],
+    );
+    losing["audienceStrict"] = json!(true);
+    losing["audience"] = json!(r#"{"filter":[{"gte":[{"var":"age"},{"value":20}]}]}"#);
+    let winner = with_variables(experiment(2, "exp_var_trigger_winner"), "k");
+    let mut ctx = context(
+        UID_NOT_HELD_OUT,
+        single_holdout(HOLDOUT_A, vec![losing, winner]),
+    );
+    let triggers = || HOLDOUT_TRIGGERS.with(|n| n.get());
+
+    let before = triggers();
+    ctx.variable_value("k", "default").unwrap();
+    assert_eq!(triggers() - before, 1);
+
+    let before = triggers();
+    for _ in 0..3 {
+        ctx.variable_value("k", "default").unwrap();
+    }
+    assert_eq!(triggers() - before, 0);
+}
+
+#[test]
+fn warmed_variable_reads_take_the_fast_path() {
+    let covered = covered_by(
+        with_variables(experiment(1, "exp_var_fast_covered"), "k"),
+        &[11],
+    );
+    let plain = with_variables(experiment(2, "exp_var_fast_plain"), "k");
+    let mut ctx = context(
+        UID_NOT_HELD_OUT,
+        single_holdout(HOLDOUT_A, vec![covered, plain]),
+    );
+    let warmed = || WARMED_READS.with(|n| n.get());
+
+    let before = warmed();
+    ctx.variable_value("k", "default").unwrap();
+    assert_eq!(warmed() - before, 0);
+
+    let before = warmed();
+    for _ in 0..3 {
+        ctx.variable_value("k", "default").unwrap();
+    }
+    assert_eq!(warmed() - before, 3);
+}
+
 #[test]
 fn first_deferred_logger_panic_is_the_one_resumed() {
     let first = covered_by(
@@ -2084,8 +2191,8 @@ fn variable_value_on_held_out_rule_won_experiment() {
     assert_eq!(
         queued(&mut ctx),
         vec![
-            rule_exposure("exp_holdout_rules", 1),
-            holdout_exposure(11, "holdout_rules_suppression", 0)
+            holdout_exposure(11, "holdout_rules_suppression", 0),
+            rule_exposure("exp_holdout_rules", 1)
         ]
     );
 }
@@ -2651,12 +2758,12 @@ fn overridden_or_rule_won_experiment_is_not_the_control_fallback() {
 
         assert_eq!(
             ctx.peek_variable_value("color", "default").unwrap(),
-            json!("control"),
+            json!("default"),
             "rule_won {rule_won}"
         );
         assert_eq!(
             ctx.variable_value("color", "default").unwrap(),
-            json!("control"),
+            json!("default"),
             "rule_won {rule_won}"
         );
     }
