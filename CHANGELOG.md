@@ -4,7 +4,14 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the crate follows
 semantic versioning (under 0.x, a minor bump is a breaking release).
 
-## [Unreleased] - 0.2.0
+## [Unreleased]
+
+## [0.2.0] - 2026-11-27
+
+Covers every change since 0.1.0: the crate rename (#7), assignment and split
+rules, semver operators, system attributes and the versioned X-Agent (#9,
+#10), holdouts (#11), and the shared variable key winner and override
+refresh fixes (#13).
 
 ### Added
 
@@ -28,9 +35,37 @@ semantic versioning (under 0.x, a minor bump is a breaking release).
   Holdout support itself does not change how payloads without holdouts
   assign or publish (exposures still gain `ruleOverride`; see Changed).
 
-### Changed
+### Migrating from 0.1.0
 
-Breaking changes are listed against the released 0.1.0.
+0.2.0 is a breaking release (a minor bump under 0.x semver). Every item
+below is listed against the published 0.1.0 crate.
+
+1. Update the dependency to `absmartly-sdk = "0.2"` and change imports from
+   `absmartly_sdk::...` to `absmartly::...`.
+2. Replace `SDK`/`SDKOptions` with `Client` (`Client::builder()`,
+   `Client::new(endpoint, api_key, application, environment)` or
+   `Client::from_config(Config)`), and create contexts with
+   `Client::create_context_with` or the async `Client::create_context`.
+   Match on `absmartly::Error` for client errors.
+3. Handle the `Result` now returned by `peek`, `treatment`,
+   `variable_value`, `peek_variable_value`, `variable_keys`, the custom-field
+   readers, `experiments`, `data`, `publish`, `finalize` and `set_override`.
+4. Pass unit values as anything `Into<serde_json::Value>`; `get_unit` and
+   `get_units` return `Value`s.
+5. Replace `refresh(data)` with `refresh_with(data)`; `refresh()` now
+   fetches with the configured data fetcher.
+6. Add `..Default::default()` to `ContextOptions` literals, and the new
+   fields (or `..`) to exhaustive `ExperimentData`, `ContextData` and
+   `Exposure` literals or patterns.
+7. Rewrite needle-first `in` audiences as `[haystack, needle]`, and review
+   strict audiences that use `eq … null`, an empty `or`, or that filter on
+   `application`/`environment` (see Breaking).
+8. Make sure `track` properties are a JSON object or null, and update code
+   that matches the old `ABSmartly` error text.
+9. If dashboards filter on the `agent` column, add the versioned
+   `absmartly-rust-sdk/<version>` value.
+
+### Breaking
 
 - Audiences and rule conditions always see the client's `application` and
   `environment`. Only non-empty values are used, and a user attribute with
@@ -39,42 +74,10 @@ Breaking changes are listed against the released 0.1.0.
   strict-audience experiments that filter on `application` or `environment`:
   before 0.2.0 they fell back to variant 0 unless a user attribute of the
   same name matched the audience.
-- An exposure is queued before the event logger receives it, as in
-  javascript-sdk, so `pending()` read inside an `exposure` callback already
-  counts it, and a panicking logger no longer loses the exposure. When one
-  call queues an experiment's exposure and its holdouts' exposures, all of
-  them are queued before the first callback, so `pending()` in that
-  callback already counts every one (javascript-sdk counts them one at a
-  time). `variable_value()` is the exception: it queues/logs the checked
-  candidates' holdouts before queuing/logging the winner's own exposure,
-  so the first holdout callback does not yet count the winner in
-  `pending()`. For variable reads this also changes the exposure order
-  to holdouts before winner, matching Java; other calls retain their
-  previous exposure order.
 - **This can change assignment** for payloads that already carry
   `holdouts` and `holdoutIds`: 0.1.0 ignored them, while 0.2.0 gives a
   held-out unit variant 0 and control variables and queues the holdout
   exposures. Payloads without holdouts are unaffected.
-- A panicking event logger on a holdout exposure during `variable_value()`
-  is resumed only after the candidates checked for the key have queued their
-  holdouts' exposures, and before the winning experiment is exposed. A panic
-  in the winner's own exposure callback propagates as before, after that
-  exposure is queued.
-- `variable_value()` exposes only the experiment that decides the key, and
-  no longer one the unit is not in; see Fixed (shared variable keys).
-- Every exposure, in the publish payload and the event logger's `exposure`
-  event, now carries `ruleOverride` (`false` unless a rule decided the
-  variant), so the backend can exclude rule-assigned exposures from analysis.
-- The event logger also receives `ready` when a context becomes ready, and
-  `error` with `{"message": ...}` when a context fails to load, `refresh()`
-  has no fetcher or its fetch fails, `refresh_with` is called on a context
-  that is not ready, finalizing or finalized, the publisher returns an error
-  from `publish()`, `finalize()` or `close()`, or one of those calls on a
-  failed context discards its pending events (it still returns `Ok`). A `publish()` or `refresh()` rejected by the readiness check
-  returns `Err` without an event.
-  `become_failed()` emits `error` with no data. 0.1.0 emitted neither event.
-- The `X-Agent` header is now `absmartly-rust-sdk/<version>`. A configured
-  `agent` is still sent as `User-Agent`.
 - **BREAKING (source):** `ExperimentData` gained `assignment_rules: String` and
   `Exposure` gained `rule_override: bool`. JSON without them still
   deserializes (they default to `""` and `false`), but exhaustive struct
@@ -129,9 +132,44 @@ Breaking changes are listed against the released 0.1.0.
   javascript-sdk. 0.1.0 recorded the goal without properties and returned
   `Ok`, so a call such as `track("purchase", 5)` now loses the goal, or
   panics if the result is unwrapped.
-- Context errors spell the brand `ABsmartly` (for example
-  `"ABsmartly Context is finalized."`). 0.1.0 used `ABSmartly`, so update
-  code that matches on the error text.
+- **BREAKING (error text):** context errors spell the brand `ABsmartly` (for
+  example `"ABsmartly Context is finalized."`). 0.1.0 used `ABSmartly`, so
+  update code that matches on the error text.
+
+### Changed
+
+- An exposure is queued before the event logger receives it, as in
+  javascript-sdk, so `pending()` read inside an `exposure` callback already
+  counts it, and a panicking logger no longer loses the exposure. When one
+  call queues an experiment's exposure and its holdouts' exposures, all of
+  them are queued before the first callback, so `pending()` in that
+  callback already counts every one (javascript-sdk counts them one at a
+  time). `variable_value()` is the exception: it queues/logs the checked
+  candidates' holdouts before queuing/logging the winner's own exposure,
+  so the first holdout callback does not yet count the winner in
+  `pending()`. For variable reads this also changes the exposure order
+  to holdouts before winner, matching Java; other calls retain their
+  previous exposure order.
+- A panicking event logger on a holdout exposure during `variable_value()`
+  is resumed only after the candidates checked for the key have queued their
+  holdouts' exposures, and before the winning experiment is exposed. A panic
+  in the winner's own exposure callback propagates as before, after that
+  exposure is queued.
+- `variable_value()` exposes only the experiment that decides the key, and
+  no longer one the unit is not in; see Fixed (shared variable keys).
+- Every exposure, in the publish payload and the event logger's `exposure`
+  event, now carries `ruleOverride` (`false` unless a rule decided the
+  variant), so the backend can exclude rule-assigned exposures from analysis.
+- The event logger also receives `ready` when a context becomes ready, and
+  `error` with `{"message": ...}` when a context fails to load, `refresh()`
+  has no fetcher or its fetch fails, `refresh_with` is called on a context
+  that is not ready, finalizing or finalized, the publisher returns an error
+  from `publish()`, `finalize()` or `close()`, or one of those calls on a
+  failed context discards its pending events (it still returns `Ok`). A `publish()` or `refresh()` rejected by the readiness check
+  returns `Err` without an event.
+  `become_failed()` emits `error` with no data. 0.1.0 emitted neither event.
+- The `X-Agent` header is now `absmartly-rust-sdk/<version>`. A configured
+  `agent` is still sent as `User-Agent`.
 
 ### Fixed
 
